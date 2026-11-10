@@ -57,6 +57,8 @@ RUN python3 -m venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1
 COPY pyproject.toml /src/
 COPY surface_harness /src/surface_harness
+# DL3013: pip/setuptools are deliberately unpinned so every rebuild picks up their security fixes.
+# hadolint ignore=DL3013
 RUN pip install --no-cache-dir --upgrade pip setuptools \
  && pip install --no-cache-dir "/src[graphql]" && rm -rf /src
 ENV SURFACE_TOOLS=local SURFACE_OUT=/data/runs
