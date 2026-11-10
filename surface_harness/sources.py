@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Awaitable, Callable
+from collections.abc import Awaitable, Callable
 
 import httpx
 
@@ -164,7 +164,7 @@ async def enumerate_passive(
 
     results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     out: dict[str, set[str]] = {}
-    for name, res in zip(tasks, results):
+    for name, res in zip(tasks, results, strict=True):
         if isinstance(res, BaseException):
             log(f"[source:{name}] {apex_name}: {type(res).__name__}: {str(res)[:150]}")
             continue

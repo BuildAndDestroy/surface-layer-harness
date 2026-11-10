@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import html
 import re
 import ssl
@@ -62,9 +63,7 @@ def detect_tech(resp: httpx.Response, body: str) -> list[str]:
             val = resp.headers.get(where.split(":", 1)[1])
             if val and (m := re.search(pattern, val)):
                 found.append(label or m.group(1).strip())
-        elif where == "cookie" and re.search(pattern, cookies, re.I):
-            found.append(label)  # type: ignore[arg-type]
-        elif where == "body" and re.search(pattern, body[:200_000], re.I):
+        elif (where == "cookie" and re.search(pattern, cookies, re.I)) or (where == "body" and re.search(pattern, body[:200_000], re.I)):
             found.append(label)  # type: ignore[arg-type]
     return sorted(set(f for f in found if f))[:20]
 
@@ -103,7 +102,7 @@ async def _handshake(host: str, port: int, verify: bool, timeout: float) -> byte
     if not verify:
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
-    reader, writer = await asyncio.wait_for(
+    _reader, writer = await asyncio.wait_for(
         asyncio.open_connection(host, port, ssl=ctx, server_hostname=host), timeout=timeout,
     )
     try:
@@ -111,10 +110,8 @@ async def _handshake(host: str, port: int, verify: bool, timeout: float) -> byte
         return sslobj.getpeercert(binary_form=True)
     finally:
         writer.close()
-        try:
+        with contextlib.suppress(Exception):
             await writer.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 async def tls_grab(host: str, port: int = 443, timeout: float = 8.0) -> TlsInfo:

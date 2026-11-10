@@ -1,5 +1,10 @@
 from surface_harness.company import (
-    candidate_names, core_name, finalize, is_commercial_agent, parse_site_page, relates_to_brand,
+    candidate_names,
+    core_name,
+    finalize,
+    is_commercial_agent,
+    parse_site_page,
+    relates_to_brand,
     same_entity,
 )
 from surface_harness.models import CompanyRecord, SiteIdentity
@@ -102,7 +107,9 @@ def test_principal_address_is_agent_address():
 
 
 def test_wikidata_item_parsing():
-    import asyncio, json
+    import asyncio
+    import json
+
     from surface_harness.company import Registries
     from surface_harness.config import Config
 

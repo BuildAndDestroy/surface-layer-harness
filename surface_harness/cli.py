@@ -60,8 +60,8 @@ def parse_args(argv: list[str] | None = None) -> Config:
 
     seeds = list(a.domains)
     if a.domains_file:
-        seeds += [l.strip() for l in Path(a.domains_file).read_text().splitlines()
-                  if l.strip() and not l.startswith("#")]
+        seeds += [ln.strip() for ln in Path(a.domains_file).read_text().splitlines()
+                  if ln.strip() and not ln.startswith("#")]
     if not seeds:
         p.error("provide at least one seed domain")
     if a.mode == "active" and not a.authorized:

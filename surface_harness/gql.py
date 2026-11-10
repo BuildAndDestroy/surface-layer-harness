@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Optional
 
 import strawberry
 from strawberry.scalars import JSON
@@ -50,7 +49,7 @@ class Store:
 STORE: Store | None = None
 
 
-def _targets(target_id: Optional[str] = None) -> list[dict]:
+def _targets(target_id: str | None = None) -> list[dict]:
     ts = STORE.doc["targets"]  # type: ignore[union-attr]
     return [t for t in ts if target_id in (None, t["id"])]
 
@@ -78,10 +77,10 @@ class Domain:
 @strawberry.type
 class HttpService:
     url: str
-    status: Optional[int]
-    final_url: Optional[str]
-    title: Optional[str]
-    server: Optional[str]
+    status: int | None
+    final_url: str | None
+    title: str | None
+    server: str | None
     tech: list[str]
 
 
@@ -105,11 +104,11 @@ class Host:
 class Ip:
     target_id: str
     ip: str
-    asn: Optional[str]
-    as_name: Optional[str]
-    prefix: Optional[str]
-    country: Optional[str]
-    ptr: Optional[str]
+    asn: str | None
+    as_name: str | None
+    prefix: str | None
+    country: str | None
+    ptr: str | None
     hosts: list[str]
     open_ports: list[int]
 
@@ -117,9 +116,9 @@ class Ip:
 @strawberry.type
 class WebOnPort:
     url: str
-    status: Optional[int]
-    title: Optional[str]
-    server: Optional[str]
+    status: int | None
+    title: str | None
+    server: str | None
 
 
 @strawberry.type(description="An open port on an IP. `hosts` are the names that resolve to that IP.")
@@ -128,13 +127,13 @@ class OpenPort:
     ip: str
     port: int
     protocol: str
-    service: Optional[str]
-    product: Optional[str]
-    version: Optional[str]
-    extra_info: Optional[str]
+    service: str | None
+    product: str | None
+    version: str | None
+    extra_info: str | None
     cpe: list[str]
-    nmap: Optional[str] = strawberry.field(description="nmap's one-line summary, e.g. 'ssl/http nginx 1.29.8'")
-    detection: Optional[str] = strawberry.field(
+    nmap: str | None = strawberry.field(description="nmap's one-line summary, e.g. 'ssl/http nginx 1.29.8'")
+    detection: str | None = strawberry.field(
         description="'probed' = nmap fingerprint match, 'table' = guessed from the port number, null = not run")
     hosts: list[str]
     web: list[WebOnPort]
@@ -163,16 +162,16 @@ class LegalEntity:
     source: str
     name: str
     match: str
-    jurisdiction: Optional[str]
-    company_number: Optional[str]
-    status: Optional[str]
-    entity_type: Optional[str]
-    formed: Optional[str]
-    registered_address: Optional[str]
-    principal_address: Optional[str]
-    mailing_address: Optional[str]
-    agent_name: Optional[str]
-    agent_address: Optional[str]
+    jurisdiction: str | None
+    company_number: str | None
+    status: str | None
+    entity_type: str | None
+    formed: str | None
+    registered_address: str | None
+    principal_address: str | None
+    mailing_address: str | None
+    agent_name: str | None
+    agent_address: str | None
     agent_commercial: bool
     address_notes: list[str]
     officers: list[Officer]
@@ -180,7 +179,7 @@ class LegalEntity:
     subsidiaries: list[str]
     websites: list[str]
     identifiers: JSON
-    url: Optional[str]
+    url: str | None
 
 
 def _domains(t: dict) -> list[Domain]:
@@ -248,7 +247,7 @@ def _ips(t: dict) -> list[Ip]:
             for ip, i in ((t.get("surface") or {}).get("ips") or {}).items()]
 
 
-def _sev_ok(sev: str, min_severity: Optional[str]) -> bool:
+def _sev_ok(sev: str, min_severity: str | None) -> bool:
     return min_severity is None or SEV.get(sev, 9) <= SEV.get(min_severity, 9)
 
 
@@ -259,7 +258,7 @@ class Target:
     status: str
     seeds: list[str]
     org: list[str]
-    run_dir: Optional[str]
+    run_dir: str | None
     meta: JSON
     summary: JSON
     analysis: JSON
@@ -271,11 +270,11 @@ class Target:
                 if d.confidence >= min_confidence and (d.in_scope or not in_scope_only)]
 
     @strawberry.field
-    def hosts(self, live: Optional[bool] = None) -> list[Host]:
+    def hosts(self, live: bool | None = None) -> list[Host]:
         return [h for h in _hosts(_targets(self.id)[0]) if live is None or h.live == live]
 
     @strawberry.field
-    def findings(self, min_severity: Optional[str] = None) -> list[Finding]:
+    def findings(self, min_severity: str | None = None) -> list[Finding]:
         return [f for f in _findings(_targets(self.id)[0]) if _sev_ok(f.severity, min_severity)]
 
     @strawberry.field
@@ -287,7 +286,7 @@ class Target:
         return _ips(_targets(self.id)[0])
 
     @strawberry.field
-    def ports(self, port: Optional[int] = None) -> list[OpenPort]:
+    def ports(self, port: int | None = None) -> list[OpenPort]:
         return [p for p in _ports(_targets(self.id)[0]) if port in (None, p.port)]
 
 
@@ -306,7 +305,7 @@ class Engagement:
     generated_at: str
     schema_version: str
     cross_target: JSON
-    summary_md: Optional[str]
+    summary_md: str | None
 
 
 @strawberry.type
@@ -324,13 +323,13 @@ class Query:
         return [_target(t) for t in _targets()]
 
     @strawberry.field
-    def target(self, id: str) -> Optional[Target]:
+    def target(self, id: str) -> Target | None:
         ts = _targets(id)
         return _target(ts[0]) if ts else None
 
     @strawberry.field(description="Hosts across targets. `tech` and `search` are case-insensitive substrings.")
-    def hosts(self, target_id: Optional[str] = None, live: Optional[bool] = None, port: Optional[int] = None,
-              tech: Optional[str] = None, search: Optional[str] = None, limit: int = 1000) -> list[Host]:
+    def hosts(self, target_id: str | None = None, live: bool | None = None, port: int | None = None,
+              tech: str | None = None, search: str | None = None, limit: int = 1000) -> list[Host]:
         out = []
         for t in _targets(target_id):
             for h in _hosts(t):
@@ -346,32 +345,32 @@ class Query:
         return out[:limit]
 
     @strawberry.field
-    def domains(self, target_id: Optional[str] = None, in_scope_only: bool = False,
+    def domains(self, target_id: str | None = None, in_scope_only: bool = False,
                 min_confidence: float = 0.0) -> list[Domain]:
         return [d for t in _targets(target_id) for d in _domains(t)
                 if d.confidence >= min_confidence and (d.in_scope or not in_scope_only)]
 
     @strawberry.field
-    def findings(self, target_id: Optional[str] = None, min_severity: Optional[str] = None,
-                 origin: Optional[str] = None) -> list[Finding]:
+    def findings(self, target_id: str | None = None, min_severity: str | None = None,
+                 origin: str | None = None) -> list[Finding]:
         out = [f for t in _targets(target_id) for f in _findings(t)
                if _sev_ok(f.severity, min_severity) and origin in (None, f.origin)]
         return sorted(out, key=lambda f: (SEV.get(f.severity, 9), f.target_id))
 
     @strawberry.field
-    def entities(self, target_id: Optional[str] = None) -> list[LegalEntity]:
+    def entities(self, target_id: str | None = None) -> list[LegalEntity]:
         return [e for t in _targets(target_id) for e in _entities(t)]
 
     @strawberry.field
-    def ips(self, target_id: Optional[str] = None, asn: Optional[str] = None) -> list[Ip]:
+    def ips(self, target_id: str | None = None, asn: str | None = None) -> list[Ip]:
         return [i for t in _targets(target_id) for i in _ips(t) if asn in (None, i.asn)]
 
     @strawberry.field(description="Open ports per IP across targets. `service` matches the service name "
                                   "(ssl/ prefix ignored), `product` is a case-insensitive substring of nmap's product, "
                                   "`host` filters to ports on IPs that host name resolves to.")
-    def ports(self, target_id: Optional[str] = None, port: Optional[int] = None, ip: Optional[str] = None,
-              service: Optional[str] = None, host: Optional[str] = None,
-              product: Optional[str] = None) -> list[OpenPort]:
+    def ports(self, target_id: str | None = None, port: int | None = None, ip: str | None = None,
+              service: str | None = None, host: str | None = None,
+              product: str | None = None) -> list[OpenPort]:
         return [p for t in _targets(target_id) for p in _ports(t)
                 if port in (None, p.port) and ip in (None, p.ip)
                 and (service is None or (p.service or "").lower().removeprefix("ssl/") == service.lower()

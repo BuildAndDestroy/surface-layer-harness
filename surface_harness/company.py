@@ -19,6 +19,7 @@ as a pivot for finding related domains or entities.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import html as htmllib
 import json
@@ -92,7 +93,7 @@ def relates_to_brand(name: str, stems: set[str]) -> bool:
         return False
     for st in stems:
         st = st.replace("-", "")
-        if s == st or (len(st) >= 5 and (st in s or s in st and len(s) >= 5)):
+        if s == st or (len(st) >= 5 and (st in s or (s in st and len(s) >= 5))):
             return True
     return False
 
@@ -238,8 +239,8 @@ def _postal(a) -> str | None:
 def parse_site_page(ident: SiteIdentity, url: str, body: str, stems: set[str]) -> None:
     if url.endswith("security.txt"):
         if "contact:" in body.lower():
-            ident.security_txt = [l.strip() for l in body.splitlines()
-                                  if re.match(r"\s*(contact|policy|hiring|canonical|acknowledgments?):", l, re.I)]
+            ident.security_txt = [ln.strip() for ln in body.splitlines()
+                                  if re.match(r"\s*(contact|policy|hiring|canonical|acknowledgments?):", ln, re.I)]
             for line in ident.security_txt:
                 for m in EMAIL_RE.finditer(line):
                     ident.emails.add(m.group(0).lower())
@@ -314,7 +315,7 @@ async def site_identity(client: httpx.AsyncClient, domain: str, stems: set[str],
         if path.endswith("security.txt") and "html" in ctype:
             return None
         body = r.text[:1_000_000]
-        digest = hashlib.sha1(body.encode(errors="ignore")).hexdigest()
+        digest = hashlib.sha1(body.encode(errors="ignore"), usedforsecurity=False).hexdigest()
         if digest in seen:  # SPA catch-all returning the same page for every path
             return None
         seen.add(digest)
@@ -383,18 +384,14 @@ class Registries:
         if relations:
             base = f"https://api.gleif.org/api/v1/lei-records/{lei}"
             for rel in ("direct-parent", "ultimate-parent"):
-                try:
+                with contextlib.suppress(Exception):  # 404 = no reported parent
                     d = await self._get(f"{base}/{rel}")
                     pname = d["data"]["attributes"]["entity"]["legalName"]["name"]
                     if pname not in c.parents:
                         c.parents.append(pname)
-                except Exception:  # noqa: BLE001 - 404 = no reported parent
-                    pass
-            try:
+            with contextlib.suppress(Exception):  # 404 = no reported children
                 d = await self._get(f"{base}/direct-children", params={"page[size]": "100"})
                 c.subsidiaries = [x["attributes"]["entity"]["legalName"]["name"] for x in d.get("data", [])]
-            except Exception:  # noqa: BLE001
-                pass
         return finalize(c)
 
     # -- OpenCorporates (token) ------------------------------------------------------
@@ -666,7 +663,7 @@ SELECT ?label ?official ?site ?countryLabel ?inception ?hqLabel ?industryLabel
         results = await asyncio.gather(*tasks.values(), return_exceptions=True)
         out: list[CompanyRecord] = []
         seen = set()
-        for (src, n), res in zip(tasks, results):
+        for (src, n), res in zip(tasks, results, strict=True):
             if isinstance(res, BaseException):
                 self.log(f"[company:{src}] '{n}': {type(res).__name__}: {str(res)[:120]}")
                 continue
@@ -710,6 +707,13 @@ def website_domains(urls) -> set[str]:
 
 
 __all__ = [
-    "Registries", "site_identity", "candidate_names", "is_commercial_agent", "same_entity",
-    "core_name", "relates_to_brand", "website_domains", "brand_stem",
+    "Registries",
+    "brand_stem",
+    "candidate_names",
+    "core_name",
+    "is_commercial_agent",
+    "relates_to_brand",
+    "same_entity",
+    "site_identity",
+    "website_domains",
 ]

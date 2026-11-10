@@ -2,7 +2,7 @@ TOOLS_IMAGE   ?= surface-tools:latest
 HARNESS_IMAGE ?= surface-harness:latest
 DOCKERFILE    := docker/Dockerfile
 
-.PHONY: help venv test images tools-image harness-image scan scan-docker engagement-docker merge serve clean
+.PHONY: help venv lint audit check test images tools-image harness-image scan scan-docker engagement-docker merge serve clean
 
 DOCKER_ENV = -e SECURITYTRAILS_API_KEY -e VIRUSTOTAL_API_KEY -e WHOISXML_API_KEY -e OTX_API_KEY \
 	-e CERTSPOTTER_API_KEY -e OPENCORPORATES_API_TOKEN -e SURFACE_CONTACT -e SEC_USER_AGENT
@@ -10,6 +10,9 @@ DOCKER_ENV = -e SECURITYTRAILS_API_KEY -e VIRUSTOTAL_API_KEY -e WHOISXML_API_KEY
 help:
 	@echo "make venv            - local Python venv (.venv) with the harness installed"
 	@echo "make test            - run unit tests"
+	@echo "make lint            - ruff (style + bandit SAST rules) and hadolint"
+	@echo "make audit           - pip-audit the venv for known-vulnerable dependencies"
+	@echo "make check           - lint + audit + test (what CI runs)"
 	@echo "make tools-image     - build recon tools image ($(TOOLS_IMAGE))"
 	@echo "make harness-image   - build all-in-one harness image ($(HARNESS_IMAGE))"
 	@echo "make scan D='acme.com' ARGS='--org \"Acme Inc\"'          - run locally (tools via docker)"
@@ -18,12 +21,24 @@ help:
 	@echo "make merge E=engagements/acme                             - rebuild report.md / engagement.json / graph"
 	@echo "make serve E=engagements/acme                             - GraphQL on http://127.0.0.1:8787/graphql"
 
+PYTHON ?= $(shell for p in python3.13 python3.12 python3.11 python3 $$HOME/.pyenv/versions/3.1[1-9]*/bin/python3; do $$p -c 'import sys; assert sys.version_info >= (3, 11)' >/dev/null 2>&1 && { echo $$p; break; }; done)
+
 venv:
-	python3 -m venv .venv
+	@test -n "$(PYTHON)" || { echo 'Python >= 3.11 required (set PYTHON=/path/to/python3.11+)'; exit 1; }
+	$(PYTHON) -m venv .venv
 	.venv/bin/pip install -q -e '.[dev]'
 
 test:
 	.venv/bin/python -m pytest -q tests
+
+lint:
+	.venv/bin/ruff check surface_harness tests
+	docker run --rm -i -v "$(CURDIR)/.hadolint.yaml:/.config/hadolint.yaml:ro" hadolint/hadolint:v2.12.0 < $(DOCKERFILE)
+
+audit:
+	.venv/bin/pip-audit --skip-editable --progress-spinner off
+
+check: lint audit test
 
 images: tools-image harness-image
 

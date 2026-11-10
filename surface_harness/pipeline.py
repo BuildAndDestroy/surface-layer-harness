@@ -17,7 +17,7 @@ import asyncio
 import json
 import re
 import time
-from typing import Callable
+from collections.abc import Callable
 
 import httpx
 
@@ -352,7 +352,9 @@ class Pipeline:
 
         src_client = httpx.AsyncClient(headers={"User-Agent": UA}, timeout=60, follow_redirects=True)
         probe_client = httpx.AsyncClient(
-            verify=False, follow_redirects=True, timeout=cfg.http_timeout,
+            # Deliberately unverified: we fingerprint targets with broken/self-signed certs too.
+            # Certificate validity is assessed separately in tls_grab() and reported as a finding.
+            verify=False, follow_redirects=True, timeout=cfg.http_timeout,  # noqa: S501
             limits=httpx.Limits(max_connections=cfg.concurrency, max_keepalive_connections=0),
         )
         try:
@@ -378,8 +380,8 @@ class Pipeline:
                          f"{', '.join(d.name for d in targets)}")
                 enum_sem = asyncio.Semaphore(3)
 
-                async def enum(d: ApexDomain):
-                    async with enum_sem:
+                async def enum(d: ApexDomain, sem: asyncio.Semaphore = enum_sem):
+                    async with sem:
                         await self.enumerate_apex(d, src_client, rel)
 
                 await asyncio.gather(*(enum(d) for d in targets))

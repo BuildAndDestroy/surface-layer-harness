@@ -1,4 +1,3 @@
-import asyncio
 
 from surface_harness.config import Config
 from surface_harness.domains import apex, normalize, stem_similarity
@@ -56,7 +55,7 @@ def _rel(seeds=("acme.com",)):
 
 
 def test_candidates_skip_third_party_and_exclusions():
-    s, rel = _rel()
+    _s, rel = _rel()
     rel.cfg.exclude = ["acme-legacy.com"]
     assert rel.add_candidate("aspmx.l.google.com", "dns-mail", "mx", 1) is None
     assert rel.add_candidate("x.acme-legacy.com", "cert-san", "c", 1) is None
@@ -105,6 +104,7 @@ def test_takeover_assessment():
 
 def test_active_requires_authorization():
     import pytest
+
     from surface_harness.cli import parse_args
     with pytest.raises(SystemExit):
         parse_args(["-m", "active", "acme.com"])

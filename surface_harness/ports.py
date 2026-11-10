@@ -8,6 +8,7 @@ scanning them maps the provider, not the target.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 
@@ -24,10 +25,8 @@ async def _connect(ip: str, port: int, timeout: float) -> bool:
     try:
         _, w = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
         w.close()
-        try:
+        with contextlib.suppress(Exception):
             await w.wait_closed()
-        except Exception:  # noqa: BLE001
-            pass
         return True
     except Exception:  # noqa: BLE001
         return False
@@ -114,7 +113,9 @@ def parse_nmap_xml(xml: str) -> dict[str, dict[int, dict]]:
     if start < 0:
         return {}
     try:
-        root = ET.fromstring(xml[start:])
+        # Input is nmap's own XML (target-controlled banners are escaped by nmap). Python's expat
+        # ignores external entities and limits entity expansion (CPython >= 3.7.1 / expat >= 2.4.1).
+        root = ET.fromstring(xml[start:])  # noqa: S314
     except ET.ParseError:
         return {}
     out: dict[str, dict[int, dict]] = {}

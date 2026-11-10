@@ -43,9 +43,9 @@ class ToolRunner:
         if tool == "httpx":
             # Don't confuse the Python 'httpx' CLI with ProjectDiscovery's httpx.
             try:
-                out = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=10)
+                out = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=10)  # noqa: S603
                 return "projectdiscovery" in (out.stdout + out.stderr).lower()
-            except Exception:
+            except Exception:  # noqa: BLE001 - any failure means "not PD httpx"
                 return False
         return True
 
@@ -54,14 +54,14 @@ class ToolRunner:
             ok = False
             if shutil.which("docker"):
                 try:
-                    r = subprocess.run(
-                        ["docker", "image", "inspect", self.image],
+                    r = subprocess.run(  # noqa: S603 - fixed argv, no shell
+                        ["docker", "image", "inspect", self.image],  # noqa: S607 - docker resolved via PATH
                         capture_output=True, timeout=20,
                     )
                     ok = r.returncode == 0
                     if not ok:
                         self.log(f"[tools] docker image {self.image} not found; build it with `make tools-image`")
-                except Exception:
+                except Exception:  # noqa: BLE001 - docker unavailable/broken
                     ok = False
             self._docker_ok = ok
         return self._docker_ok
@@ -117,7 +117,7 @@ class ToolRunner:
             )
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 proc.kill()
                 await proc.wait()
                 return ToolResult(False, "", f"{tool} timed out after {timeout}s", -1)

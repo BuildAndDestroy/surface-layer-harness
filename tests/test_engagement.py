@@ -5,7 +5,15 @@ import pytest
 
 from surface_harness.engagement import write_merged
 from surface_harness.models import (
-    ApexDomain, CompanyRecord, Finding, Host, HttpService, IpInfo, Officer, SiteIdentity, Surface,
+    ApexDomain,
+    CompanyRecord,
+    Finding,
+    Host,
+    HttpService,
+    IpInfo,
+    Officer,
+    SiteIdentity,
+    Surface,
 )
 from surface_harness.report import write_all
 from surface_harness.scope import ScopeError, load_scope
@@ -71,7 +79,7 @@ def eng(tmp_path: Path):
 
 def test_scope_validation(tmp_path):
     (tmp_path / "scope.yaml").write_text(SCOPE.replace('reference: "SOW-1", ', ""))
-    with pytest.raises(ScopeError, match="authorization.reference"):
+    with pytest.raises(ScopeError, match=r"authorization\.reference"):
         load_scope(tmp_path)
     (tmp_path / "scope.yaml").write_text(SCOPE)
     sc = load_scope(tmp_path)
