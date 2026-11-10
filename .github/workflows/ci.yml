@@ -64,7 +64,7 @@ jobs:
           python-version: "3.12"
       - run: |
           python -m pip install --upgrade pip setuptools
-          pip install "pip-audit==2.10.1" '.[graphql]'
+          pip install "pip-audit==2.10.1" -e '.[graphql]'   # editable so --skip-editable skips our own package
       # Audits the resolved environment (runtime + graphql extras), skipping the local package itself.
       - run: pip-audit --strict --progress-spinner off --skip-editable
 

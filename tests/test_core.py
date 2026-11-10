@@ -68,9 +68,10 @@ def test_candidates_skip_third_party_and_exclusions():
 def test_redirect_and_unrelated_links():
     s, rel = _rel()
     rel.from_redirect("www.acme.com", "https://www.acmegroup.com/en", 0)
-    assert "acmegroup.com" in s.domains
+    # s.domains is a dict keyed by apex domain; look keys up explicitly (not a URL substring check)
+    assert s.domains.get("acmegroup.com") is not None
     rel.from_links("www.acme.com", '<a href="https://random-site.org/x">', 0)
-    assert "random-site.org" not in s.domains
+    assert s.domains.get("random-site.org") is None
 
 
 def test_rdap_parse_redaction():
