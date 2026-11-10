@@ -13,7 +13,8 @@ Give it one or more seed domains. It finds the organisation's **other domains**,
 [Output and JSON contract](#output-one-report--json-for-tools) ·
 [Visualising and querying](#visualising-and-querying-graph--graphql) · [Pipeline](#pipeline) ·
 [Company information](#company-information) ·
-[Tools and API keys](#tools-data-sources-and-api-keys) · [Running it](#running-it)
+[Tools and API keys](#tools-data-sources-and-api-keys) · [Running it](#running-it) ·
+[Development and CI](#development-and-ci)
 
 ## Engagements (multiple companies per contract)
 
@@ -417,6 +418,27 @@ See [Tools, data sources and API keys](#tools-data-sources-and-api-keys).
 
 Results are checkpointed after every round. Ctrl-C writes partial results.
 
+## Development and CI
+
+Requires **Python 3.11+** (the fixed dnspython/filelock releases dropped 3.10) and Docker for the
+tool images. `make venv` picks the newest Python ≥ 3.11 it finds (`PYTHON=/path/to/python` overrides).
+
+```bash
+make venv          # .venv with dev tools (pytest, ruff, pip-audit)
+make check         # what CI runs: ruff (incl. bandit SAST rules) + hadolint + pip-audit + pytest
+pip install pre-commit && pre-commit install   # optional: ruff + gitleaks + hygiene hooks on commit
+```
+
+| Workflow | Runs on | What it checks |
+|---|---|---|
+| `CI` | PRs, `main` | ruff lint with bandit `S` rules; pytest on Python 3.11/3.12/3.13 plus CLI smoke test; pip-audit (fails on any known-vulnerable dependency); hadolint |
+| `CodeQL` | PRs, `main`, weekly | SAST with the `security-extended` queries for Python and for the workflows themselves |
+| `Security` | PRs, `main` | gitleaks secret scan over every commit in the PR; GitHub dependency review (blocks new high-severity dependencies) |
+| `Docker images` | PRs that touch code/Docker, `main`, `v*` tags | builds both targets and smoke-tests the binaries; Grype image scan to code scanning (reported, not blocking); on `main`/tags it pushes `ghcr.io/buildanddestroy/surface-{tools,harness}` with SBOM + provenance |
+
+All third-party actions are pinned to commit SHAs, workflows default to read-only tokens, and
+Dependabot opens weekly grouped updates for actions, pip and the Docker base images.
+
 ## Layout
 ```
 surface_harness/
@@ -439,4 +461,5 @@ docker/Dockerfile   targets: tools (Go recon binaries + nmap), harness (tools + 
 .claude/agents/surface-recon.md     per-target analyst subagent
 .claude/commands/engagement.md      /engagement boss command
 examples/scope.example.yaml
+.github/workflows/  ci, codeql, security, docker (see Development and CI)
 ```
