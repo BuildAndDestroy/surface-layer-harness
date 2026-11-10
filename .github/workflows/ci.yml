@@ -65,8 +65,9 @@ jobs:
       - run: |
           python -m pip install --upgrade pip setuptools
           pip install "pip-audit==2.10.1" -e '.[graphql]'   # editable so --skip-editable skips our own package
-      # Audits the resolved environment (runtime + graphql extras), skipping the local package itself.
-      - run: pip-audit --strict --progress-spinner off --skip-editable
+      # Audits the resolved environment (runtime + graphql extras). Our own package is installed
+      # editable and skipped (it is not on PyPI); no --strict, which would turn that skip into a failure.
+      - run: pip-audit --progress-spinner off --skip-editable
 
   hadolint:
     name: Dockerfile lint (hadolint)
