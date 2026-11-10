@@ -1,0 +1,45 @@
+[project]
+name = "surface-harness"
+version = "0.1.0"
+description = "Attack surface discovery harness: seeds -> related domains -> subdomains -> DNS -> HTTP/ports -> report"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.27",
+    "dnspython>=2.9",  # 2.9.0 fixes CVE-2026-114605
+    "tldextract>=5.1",
+    "filelock>=4.2.1",  # transitive via tldextract; 4.2.1 fixes a batch of CVEs
+    "cryptography>=42",
+    "pyyaml>=6",
+]
+
+[project.optional-dependencies]
+graphql = ["strawberry-graphql[asgi]>=0.240", "uvicorn>=0.30"]
+dev = ["pytest>=8", "strawberry-graphql[asgi]>=0.240", "uvicorn>=0.30", "ruff==0.17.4", "pip-audit==2.10.1"]
+
+[project.scripts]
+surface-harness = "surface_harness.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["surface_harness*"]
+
+[tool.setuptools.package-data]
+surface_harness = ["data/*.txt"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/W/F pycodestyle+pyflakes, I isort, B bugbear, UP pyupgrade, S bandit (SAST), SIM, RUF
+select = ["E", "F", "W", "I", "B", "BLE", "UP", "S", "SIM", "RUF"]
+
+# E501: long lines are allowed (embedded HTML/JS, data tables); readability is reviewed by humans.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S101"]  # assert is how pytest works
+"surface_harness/company.py" = ["RUF001"]  # regexes deliberately match typographic quotes/dashes

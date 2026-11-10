@@ -1,0 +1,109 @@
+name: Docker images
+
+# PRs: build both targets, smoke-test them and scan the harness image (nothing is pushed).
+# main / v* tags: also push to ghcr.io/<owner>/surface-tools and ghcr.io/<owner>/surface-harness.
+on:
+  pull_request:
+    paths: ["docker/**", "surface_harness/**", "pyproject.toml", ".dockerignore", ".github/workflows/docker.yml"]
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write          # push to GHCR (only used outside PRs)
+      security-events: write   # upload image scan SARIF
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [tools, harness]
+    env:
+      PUSH: ${{ github.event_name != 'pull_request' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: env.PUSH == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/surface-${{ matrix.target }}
+          tags: |
+            type=ref,event=pr
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=semver,pattern={{version}}
+
+      - name: Build (load locally for testing)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ matrix.target }}
+          load: true
+          tags: surface-${{ matrix.target }}:ci
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+      - name: Smoke test
+        run: |
+          if [ "${{ matrix.target }}" = tools ]; then
+            for t in subfinder dnsx naabu; do docker run --rm surface-tools:ci $t -version 2>&1 | tail -1; done
+            docker run --rm surface-tools:ci nmap --version | head -1
+          else
+            docker run --rm surface-harness:ci --help >/dev/null
+            docker run --rm --entrypoint sh surface-harness:ci -c 'nmap --version | head -1 && python -c "import strawberry, uvicorn"'
+          fi
+
+      - name: Vulnerability scan (Grype)
+        id: scan
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: surface-${{ matrix.target }}:ci
+          fail-build: false          # report to code scanning; don't block on base-image CVEs
+          severity-cutoff: high
+          only-fixed: true
+          output-format: sarif
+
+      - name: Upload scan results
+        if: always() && steps.scan.outputs.sarif != ''
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          sarif_file: ${{ steps.scan.outputs.sarif }}
+          category: grype-${{ matrix.target }}
+
+      - name: Push
+        if: env.PUSH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: docker/Dockerfile
+          target: ${{ matrix.target }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.target }}
+          provenance: true
+          sbom: true

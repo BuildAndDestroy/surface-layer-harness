@@ -1,0 +1,22 @@
+# Example engagement used while developing the harness. Copy it to engagements/<id>/scope.yaml.
+# Public bug-bounty / own-company targets only; keep mode passive or standard for these.
+engagement: harness-testing
+client: "Harness development"
+authorization:
+  reference: "internal testing - public bug bounty programs / own company"
+  active_testing: false
+defaults:
+  mode: standard
+  depth: 1
+  threshold: 0.7
+  max_apexes: 10
+exclude: []
+targets:
+  - id: hackerone
+    name: "HackerOne Inc."
+    domains: [hackerone.com]
+    org: ["HackerOne Inc."]
+  - id: harvestrangelabs
+    name: "Harvest Range Labs"
+    domains: [harvestrangelabs.com]
+    org: ["Harvest Range Labs LLC"]

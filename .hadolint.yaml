@@ -1,0 +1,4 @@
+# DL3008: apt package pinning. Debian security updates replace the pinned versions, so exact pins
+# break rebuilds; the base images are pinned by tag and updated by Dependabot instead.
+ignored:
+  - DL3008
