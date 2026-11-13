@@ -416,6 +416,16 @@ class Pipeline:
             return
         self.s.findings.extend(await scan_login_paths(client, hosts, self.sem, self.log))
 
+    async def credential_exposure(self, client: httpx.AsyncClient) -> None:
+        """Passive credential-exposure reporting (standard+): breach counts by domain,
+        corporate email-format inference, and public-repo secret scanning. Read-only;
+        no authentication, guessing or user enumeration. Skips cleanly without keys/tools."""
+        from .cred_exposure import collect
+        findings = await collect(self.s, self.cfg, client, self.runner, self.log)
+        if findings:
+            self.log(f"[cred] {len(findings)} credential-exposure finding(s)")
+        self.s.findings.extend(findings)
+
     def derive_findings(self) -> None:
         for h in self.s.hosts.values():
             for svc in h.http:
@@ -507,6 +517,8 @@ class Pipeline:
             if cfg.active:
                 await self.port_scan(probe_client)
             await self.protocol_hygiene()
+            if cfg.http_probe:  # passive, but standard mode and above only
+                await self.credential_exposure(src_client)
             self.derive_findings()
             self.checkpoint(self.s)
         finally:

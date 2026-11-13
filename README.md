@@ -348,6 +348,20 @@ Each binary runs locally if it's on `PATH`, otherwise via `docker run --rm surfa
 | [SEC EDGAR](https://www.sec.gov/edgar) | Public companies: CIK, EIN, addresses, former names | **contact required** | `SURFACE_CONTACT` or `SEC_USER_AGENT` |
 | [Wikidata](https://www.wikidata.org) | Entity by official website, with parent/subsidiaries and their websites | **contact required** | `SURFACE_CONTACT` |
 
+### Credential exposure (passive, standard mode and above)
+
+Read-only reporting for the client report: no authentication, password guessing or user enumeration.
+Only aggregate exposure metadata is ever recorded - never a password, hash or secret value.
+
+| Source | Used for | Key | Env var |
+|---|---|---|---|
+| [Have I Been Pwned](https://haveibeenpwned.com/api/v3) | Breach-by-domain **counts**: exposed accounts per breach, breach names and dates (finding `breach-exposure`) | **required** | `HIBP_API_KEY` |
+| Pipeline-collected contacts | Likely corporate email format, e.g. `{first}.{last}@domain`, inferred from seed-site / security.txt emails (finding `email-format`) | none | |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | Secret counts, rule types and file paths in the org's already-known public repos (finding `secret-exposure`) | optional tool (local binary) | |
+
+Skipped cleanly when `HIBP_API_KEY` or a local `gitleaks`/`git` binary is absent. The HIBP
+breach-by-domain endpoint only returns data for domains verified on your HIBP subscription.
+
 `SURFACE_CONTACT` is an email address or URL for the User-Agent, which the SEC and Wikimedia
 require. The harness never makes one up, so those sources are skipped without it. Utah, Wyoming,
 Delaware and other states without a free open-data API are covered only through OpenCorporates.
@@ -359,6 +373,7 @@ export SURFACE_CONTACT="security@yourfirm.example"     # SEC + Wikidata
 export OPENCORPORATES_API_TOKEN=...                      # company registries beyond CO/NY/OR
 export WHOISXML_API_KEY=...                              # reverse WHOIS (related domains)
 export SECURITYTRAILS_API_KEY=...  VIRUSTOTAL_API_KEY=...  OTX_API_KEY=...  CERTSPOTTER_API_KEY=...
+export HIBP_API_KEY=...                                  # breach-by-domain exposure counts
 ```
 
 The `make scan-docker` and `make engagement-docker` targets pass these variables through to the

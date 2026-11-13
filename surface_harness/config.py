@@ -55,6 +55,7 @@ class Config:
             ("OTX_API_KEY", "otx"),
             ("CERTSPOTTER_API_KEY", "certspotter"),
             ("OPENCORPORATES_API_TOKEN", "opencorporates"),
+            ("HIBP_API_KEY", "hibp"),  # Have I Been Pwned: passive breach-by-domain counts
             ("SEC_USER_AGENT", "sec_user_agent"),
             ("SURFACE_CONTACT", "contact"),  # email/URL for Wikimedia + SEC User-Agent policies  # e.g. "Acme Security research@acme.example"
         ):
