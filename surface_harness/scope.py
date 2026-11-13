@@ -17,6 +17,7 @@ from pathlib import Path
 import yaml
 
 from .config import MODES, Config
+from .networks import validate_asns, validate_networks
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
 
@@ -31,6 +32,8 @@ class Target:
     name: str
     domains: list[str]
     org: list[str] = field(default_factory=list)
+    networks: list[str] = field(default_factory=list)  # CIDRs, e.g. 203.0.113.0/24
+    asns: list[str] = field(default_factory=list)  # e.g. AS64500
     exclude: list[str] = field(default_factory=list)
     mode: str | None = None
     depth: int | None = None
@@ -75,6 +78,7 @@ class Scope:
                              f"in {self.path}")
         return Config(
             seeds=list(t.domains), org_names=list(t.org), mode=mode, authorized=self.active_allowed,
+            networks=list(t.networks), asns=list(t.asns),
             max_depth=t.depth if t.depth is not None else d.get("depth", 1),
             expand_threshold=t.threshold if t.threshold is not None else d.get("threshold", 0.7),
             max_apexes=d.get("max_apexes", 25),
@@ -112,8 +116,14 @@ def load_scope(path: str | Path) -> Scope:
         seen.add(tid)
         if not t.get("domains"):
             raise ScopeError(f"{p}: target '{tid}' has no domains")
+        try:
+            networks = validate_networks(t.get("networks") or [])
+            asns = validate_asns(t.get("asns") or [])
+        except ValueError as e:
+            raise ScopeError(f"{p}: target '{tid}': {e}") from e
         targets.append(Target(
             id=tid, name=t.get("name") or tid, domains=list(t["domains"]), org=list(t.get("org") or []),
+            networks=networks, asns=asns,
             exclude=list(t.get("exclude") or []), mode=t.get("mode"), depth=t.get("depth"),
             threshold=t.get("threshold"), notes=t.get("notes") or "",
         ))
@@ -143,6 +153,8 @@ targets:
     name: "Example Corp"
     domains: [example.com]
     org: ["Example Corporation"]
+    # networks: [203.0.113.0/24]   # in-scope IP ranges (CIDRs); expanded to host IPs for DNS/PTR
+    # asns: [AS64500]              # in-scope ASNs; prefixes fetched via RIPEstat, then expanded
     exclude: []
     notes: ""
 """

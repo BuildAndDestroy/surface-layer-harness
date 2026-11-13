@@ -278,6 +278,42 @@ class Pipeline:
                     f"{info.as_name} ({info.prefix}) looks organisation-owned; review its prefixes "
                     f"for additional hosts"))
 
+    async def network_seed(self, client: httpx.AsyncClient) -> None:
+        """Seed IPs from in-scope CIDRs / ASNs so DNS/PTR enrichment (and, in active mode,
+        port scanning) cover them. ASN -> prefixes is a passive RIPEstat lookup."""
+        cfg = self.cfg
+        if not cfg.networks and not cfg.asns:
+            return
+        from .networks import asn_prefixes, expand_networks
+        cidrs = list(cfg.networks)
+        for asn in cfg.asns:
+            pfx = await asn_prefixes(client, asn, self.log)
+            self.log(f"[network] {asn}: {len(pfx)} announced prefix(es) via RIPEstat")
+            cidrs += pfx
+        ips, notes = expand_networks(cidrs, cfg.max_network_hosts)
+        for note in notes:
+            self.log(f"[network] {note}")
+            self.s.findings.append(Finding(
+                "info", "network-cap", ", ".join(cfg.networks + cfg.asns) or "scope", note))
+        added = 0
+        for ip in ips:
+            if ip not in self.s.ips:
+                self.s.ips[ip] = IpInfo(ip=ip)
+                added += 1
+        self.log(f"[network] seeded {added} IP(s) from {len(cfg.networks)} CIDR(s) / "
+                 f"{len(cfg.asns)} ASN(s) for DNS/PTR enrichment")
+
+    async def cloud_recon(self, client: httpx.AsyncClient) -> None:
+        """Passive cloud-asset discovery: storage buckets (standard mode+) and M365 tenants."""
+        from .cloud import brand_stems, discover_buckets, discover_m365
+        cfg = self.cfg
+        in_scope = [d.name for d in self.s.in_scope_apexes(cfg.expand_threshold)]
+        domains = list(dict.fromkeys(self.s.seeds + in_scope))[:12]
+        self.s.findings.extend(await discover_m365(client, domains, self.log))
+        if cfg.http_probe:  # bucket probing touches third-party endpoints; standard mode and up
+            stems = brand_stems(self.s.seeds, self.s.org_names)
+            self.s.findings.extend(await discover_buckets(client, stems, self.log))
+
     async def takeovers(self) -> None:
         cands = [h for h in self.s.hosts.values() if h.cnames]
         if not cands:
@@ -464,7 +500,9 @@ class Pipeline:
 
             if cfg.http_probe:
                 await self.probe_login_paths(probe_client)
+            await self.network_seed(src_client)
             await self.enrich_ips()
+            await self.cloud_recon(src_client)
             await self.takeovers()
             if cfg.active:
                 await self.port_scan(probe_client)
