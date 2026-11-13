@@ -25,6 +25,7 @@ from .company import Registries, candidate_names, site_identity
 from .config import DEFAULT_PORTS, Config
 from .dns_ops import Dns, load_wordlist
 from .domains import apex, is_subdomain_of, normalize
+from .login_paths import scan_login_paths
 from .models import ApexDomain, Finding, Host, IpInfo, Surface
 from .ports import SHARED_EDGE_AS, nmap_services, scan
 from .probe import http_probe, tls_grab
@@ -32,6 +33,7 @@ from .related import RelatedDiscovery
 from .sources import UA, enumerate_passive
 from .takeover import assess
 from .tools import ToolRunner
+from .udp_probe import udp_vpn_scan
 
 SENSITIVE_PORTS = {
     23: ("high", "Telnet"), 445: ("high", "SMB"), 3389: ("medium", "RDP"), 5900: ("medium", "VNC"),
@@ -41,10 +43,19 @@ SENSITIVE_PORTS = {
     9200: ("high", "Elasticsearch"), 11211: ("high", "Memcached"), 5984: ("high", "CouchDB"),
     6443: ("medium", "Kubernetes API"), 10000: ("medium", "Webmin"), 21: ("low", "FTP"),
     5985: ("medium", "WinRM"), 5986: ("medium", "WinRM"), 15672: ("medium", "RabbitMQ mgmt"),
+    # Remote-access / VPN / admin gateways.
+    1194: ("medium", "OpenVPN (TCP)"), 1494: ("medium", "Citrix ICA"),
+    1723: ("medium", "PPTP VPN"), 2598: ("medium", "Citrix CGP (session reliability)"),
+    4433: ("medium", "alt-HTTPS/admin"), 8834: ("medium", "Nessus"),
+    10443: ("medium", "SSL-VPN portal"),
 }
 INTERESTING_TECH = {"Jenkins", "Grafana", "Kibana", "phpMyAdmin", "Swagger UI", "GitLab",
                     "Outlook Web App", "Citrix Gateway", "Palo Alto GlobalProtect", "Fortinet",
-                    "Ivanti/Pulse VPN"}
+                    "Ivanti/Pulse VPN",
+                    # remote-access gateways / admin portals
+                    "Cisco AnyConnect/ASA", "SonicWall SSL-VPN", "Check Point Mobile Access",
+                    "F5 BIG-IP", "VMware Horizon", "Microsoft RD Web", "Exchange ECP",
+                    "ADFS", "Okta"}
 NONPROD_RE = re.compile(r"(^|[.-])(dev|develop|staging|stage|stg|uat|qa|test|sandbox|preprod|internal)\d*([.-]|$)")
 GENERIC_ORG_RE = re.compile(
     r"cloudflare|amazon|google|microsoft|akamai|fastly|let's encrypt|digicert|sectigo|"
@@ -286,6 +297,8 @@ class Pipeline:
             self.log(f"[ports] skipping {skipped} IPs on shared CDN/WAF networks")
         open_ports = await scan(self.runner, targets, self.cfg.ports or DEFAULT_PORTS,
                                 self.cfg.concurrency * 4, self.log)
+        # UDP VPN presence probes run alongside the TCP scan (active mode only).
+        self.s.findings.extend(await udp_vpn_scan(targets, self.log))
         services = await nmap_services(self.runner, open_ports, self.log)
         for ip, ports in open_ports.items():
             info = self.s.ips[ip]
@@ -322,6 +335,14 @@ class Pipeline:
         if extra:
             self.log(f"[http] probing {len(extra)} non-standard web ports")
             await asyncio.gather(*(one(h, u) for h, u in extra))
+
+    async def probe_login_paths(self, client: httpx.AsyncClient) -> None:
+        """GET a small, constant set of known remote-access login paths on web hosts."""
+        hosts = [h for h in self.s.hosts.values()
+                 if h.resolved and not h.wildcard and any(s.status is not None for s in h.http)]
+        if not hosts:
+            return
+        self.s.findings.extend(await scan_login_paths(client, hosts, self.sem, self.log))
 
     def derive_findings(self) -> None:
         for h in self.s.hosts.values():
@@ -405,6 +426,8 @@ class Pipeline:
                 if not is_subdomain_of(h.name, h.apex):
                     del self.s.hosts[h.name]
 
+            if cfg.http_probe:
+                await self.probe_login_paths(probe_client)
             await self.enrich_ips()
             await self.takeovers()
             if cfg.active:
