@@ -47,6 +47,19 @@ TECH_HINTS = [
     ("body", r"GlobalProtect", "Palo Alto GlobalProtect"),
     ("body", r"FortiGate|fgt_lang", "Fortinet"),
     ("body", r"Pulse Secure|Ivanti Connect Secure", "Ivanti/Pulse VPN"),
+    # Remote-access gateways / VPNs / admin portals. Anchored to product-specific
+    # markers (not generic words) to keep false positives low; matched on the page
+    # already fetched from "/".
+    ("body", r"/\+CSCOE\+/|SSL VPN Service", "Cisco AnyConnect/ASA"),
+    ("body", r"SonicWall", "SonicWall SSL-VPN"),
+    ("body", r"Check Point Mobile Access|Check Point Software", "Check Point Mobile Access"),
+    ("body", r"\bBIG-IP\b|F5 Networks", "F5 BIG-IP"),
+    ("cookie", r"BIGipServer|TS01[0-9a-f]{6}", "F5 BIG-IP"),
+    ("body", r"VMware Horizon|Horizon View|/portal/webclient", "VMware Horizon"),
+    ("body", r"/RDWeb|RD Web Access", "Microsoft RD Web"),
+    ("body", r"/ecp/|Exchange Admin Center", "Exchange ECP"),
+    ("body", r"/adfs/ls|AD FS|Federation Service", "ADFS"),
+    ("body", r"okta-sign-in", "Okta"),
     ("body", r"swagger-ui", "Swagger UI"),
     ("body", r"phpMyAdmin", "phpMyAdmin"),
 ]

@@ -12,6 +12,7 @@ import warnings
 from pathlib import Path
 
 from .config import MODES, Config
+from .networks import validate_asns, validate_networks
 from .pipeline import Pipeline
 from .report import write_all
 
@@ -30,6 +31,14 @@ def parse_args(argv: list[str] | None = None) -> Config:
     p.add_argument("--org", action="append", default=[],
                    help="organisation legal name (repeatable), e.g. 'Acme Corporation'. "
                         "Enables CT search by certificate O= and reverse WHOIS.")
+    p.add_argument("--cidr", action="append", default=[],
+                   help="in-scope IP range as a CIDR (repeatable), e.g. 203.0.113.0/24. "
+                        "Expanded to host IPs for DNS/PTR enrichment (and port scanning in active mode).")
+    p.add_argument("--asn", action="append", default=[],
+                   help="in-scope ASN (repeatable), e.g. AS64500. Announced prefixes are fetched "
+                        "passively via RIPEstat, then expanded like --cidr.")
+    p.add_argument("--max-net-hosts", type=int, default=4096,
+                   help="cap on host addresses enumerated from --cidr/--asn (default 4096 = one /20)")
     p.add_argument("-m", "--mode", choices=MODES, default="standard",
                    help="passive: third-party data + DNS only; standard: + HTTP/TLS probing (default); "
                         "active: + DNS brute force and port scanning (requires --authorized)")
@@ -67,9 +76,15 @@ def parse_args(argv: list[str] | None = None) -> Config:
     if a.mode == "active" and not a.authorized:
         p.error("active mode sends scan traffic to the targets; pass --authorized to confirm "
                 "you have permission to test them")
+    try:
+        networks = validate_networks(a.cidr)
+        asns = validate_asns(a.asn)
+    except ValueError as e:
+        p.error(str(e))
 
     return Config(
         seeds=seeds, org_names=a.org, mode=a.mode, authorized=a.authorized,
+        networks=networks, asns=asns, max_network_hosts=a.max_net_hosts,
         max_depth=a.depth, expand_threshold=a.threshold, max_apexes=a.max_apexes,
         exclude=[x.lower().strip(".") for x in a.exclude], out_dir=a.out,
         concurrency=a.concurrency,

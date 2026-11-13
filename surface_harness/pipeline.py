@@ -23,15 +23,20 @@ import httpx
 
 from .company import Registries, candidate_names, site_identity
 from .config import DEFAULT_PORTS, Config
+from .dns_audit import audit_dns
 from .dns_ops import Dns, load_wordlist
 from .domains import apex, is_subdomain_of, normalize
+from .email_sec import assess_email_security
+from .login_paths import scan_login_paths
 from .models import ApexDomain, Finding, Host, IpInfo, Surface
 from .ports import SHARED_EDGE_AS, nmap_services, scan
 from .probe import http_probe, tls_grab
 from .related import RelatedDiscovery
 from .sources import UA, enumerate_passive
 from .takeover import assess
+from .tls_audit import audit_tls
 from .tools import ToolRunner
+from .udp_probe import udp_vpn_scan
 
 SENSITIVE_PORTS = {
     23: ("high", "Telnet"), 445: ("high", "SMB"), 3389: ("medium", "RDP"), 5900: ("medium", "VNC"),
@@ -41,10 +46,19 @@ SENSITIVE_PORTS = {
     9200: ("high", "Elasticsearch"), 11211: ("high", "Memcached"), 5984: ("high", "CouchDB"),
     6443: ("medium", "Kubernetes API"), 10000: ("medium", "Webmin"), 21: ("low", "FTP"),
     5985: ("medium", "WinRM"), 5986: ("medium", "WinRM"), 15672: ("medium", "RabbitMQ mgmt"),
+    # Remote-access / VPN / admin gateways.
+    1194: ("medium", "OpenVPN (TCP)"), 1494: ("medium", "Citrix ICA"),
+    1723: ("medium", "PPTP VPN"), 2598: ("medium", "Citrix CGP (session reliability)"),
+    4433: ("medium", "alt-HTTPS/admin"), 8834: ("medium", "Nessus"),
+    10443: ("medium", "SSL-VPN portal"),
 }
 INTERESTING_TECH = {"Jenkins", "Grafana", "Kibana", "phpMyAdmin", "Swagger UI", "GitLab",
                     "Outlook Web App", "Citrix Gateway", "Palo Alto GlobalProtect", "Fortinet",
-                    "Ivanti/Pulse VPN"}
+                    "Ivanti/Pulse VPN",
+                    # remote-access gateways / admin portals
+                    "Cisco AnyConnect/ASA", "SonicWall SSL-VPN", "Check Point Mobile Access",
+                    "F5 BIG-IP", "VMware Horizon", "Microsoft RD Web", "Exchange ECP",
+                    "ADFS", "Okta"}
 NONPROD_RE = re.compile(r"(^|[.-])(dev|develop|staging|stage|stg|uat|qa|test|sandbox|preprod|internal)\d*([.-]|$)")
 GENERIC_ORG_RE = re.compile(
     r"cloudflare|amazon|google|microsoft|akamai|fastly|let's encrypt|digicert|sectigo|"
@@ -264,6 +278,42 @@ class Pipeline:
                     f"{info.as_name} ({info.prefix}) looks organisation-owned; review its prefixes "
                     f"for additional hosts"))
 
+    async def network_seed(self, client: httpx.AsyncClient) -> None:
+        """Seed IPs from in-scope CIDRs / ASNs so DNS/PTR enrichment (and, in active mode,
+        port scanning) cover them. ASN -> prefixes is a passive RIPEstat lookup."""
+        cfg = self.cfg
+        if not cfg.networks and not cfg.asns:
+            return
+        from .networks import asn_prefixes, expand_networks
+        cidrs = list(cfg.networks)
+        for asn in cfg.asns:
+            pfx = await asn_prefixes(client, asn, self.log)
+            self.log(f"[network] {asn}: {len(pfx)} announced prefix(es) via RIPEstat")
+            cidrs += pfx
+        ips, notes = expand_networks(cidrs, cfg.max_network_hosts)
+        for note in notes:
+            self.log(f"[network] {note}")
+            self.s.findings.append(Finding(
+                "info", "network-cap", ", ".join(cfg.networks + cfg.asns) or "scope", note))
+        added = 0
+        for ip in ips:
+            if ip not in self.s.ips:
+                self.s.ips[ip] = IpInfo(ip=ip)
+                added += 1
+        self.log(f"[network] seeded {added} IP(s) from {len(cfg.networks)} CIDR(s) / "
+                 f"{len(cfg.asns)} ASN(s) for DNS/PTR enrichment")
+
+    async def cloud_recon(self, client: httpx.AsyncClient) -> None:
+        """Passive cloud-asset discovery: storage buckets (standard mode+) and M365 tenants."""
+        from .cloud import brand_stems, discover_buckets, discover_m365
+        cfg = self.cfg
+        in_scope = [d.name for d in self.s.in_scope_apexes(cfg.expand_threshold)]
+        domains = list(dict.fromkeys(self.s.seeds + in_scope))[:12]
+        self.s.findings.extend(await discover_m365(client, domains, self.log))
+        if cfg.http_probe:  # bucket probing touches third-party endpoints; standard mode and up
+            stems = brand_stems(self.s.seeds, self.s.org_names)
+            self.s.findings.extend(await discover_buckets(client, stems, self.log))
+
     async def takeovers(self) -> None:
         cands = [h for h in self.s.hosts.values() if h.cnames]
         if not cands:
@@ -286,6 +336,8 @@ class Pipeline:
             self.log(f"[ports] skipping {skipped} IPs on shared CDN/WAF networks")
         open_ports = await scan(self.runner, targets, self.cfg.ports or DEFAULT_PORTS,
                                 self.cfg.concurrency * 4, self.log)
+        # UDP VPN presence probes run alongside the TCP scan (active mode only).
+        self.s.findings.extend(await udp_vpn_scan(targets, self.log))
         services = await nmap_services(self.runner, open_ports, self.log)
         for ip, ports in open_ports.items():
             info = self.s.ips[ip]
@@ -322,6 +374,59 @@ class Pipeline:
         if extra:
             self.log(f"[http] probing {len(extra)} non-standard web ports")
             await asyncio.gather(*(one(h, u) for h, u in extra))
+
+    async def protocol_hygiene(self) -> None:
+        """Grade protocol hygiene from DNS + light TLS probes: email authentication
+        (SPF/DMARC/DKIM/MTA-STS/TLS-RPT) and DNS hygiene (AXFR/DNSSEC/CAA/dangling NS)
+        for every in-scope apex, plus a TLS-config audit of live TLS hosts."""
+        cfg = self.cfg
+        apexes = [d for d in self.s.in_scope_apexes(cfg.expand_threshold) if not self.excluded(d.name)]
+        self.log(f"[hygiene] email + DNS checks on {len(apexes)} apex domain(s)")
+        for d in apexes:
+            self.s.findings.extend(await assess_email_security(self.dns, d.name))
+            self.s.findings.extend(await audit_dns(self.dns, d.name))
+
+        if not cfg.http_probe:
+            return
+        targets: list[tuple[str, int]] = []
+        for h in self.s.hosts.values():
+            if not h.resolved or h.wildcard:
+                continue
+            ports = {t.port for t in h.tls} | {p for p in h.open_ports if p in WEB_PORTS_TLS}
+            targets.extend((h.name, p) for p in sorted(ports))
+        if not targets:
+            return
+        self.log(f"[hygiene] TLS config audit on {len(targets)} host:port endpoint(s)")
+        # Verified client: the HSTS header check is only meaningful on a valid cert
+        # (see audit_tls); weak/invalid certs are reported by the tls-* findings.
+        async with httpx.AsyncClient(
+                follow_redirects=False, timeout=6.0,
+                limits=httpx.Limits(max_connections=cfg.concurrency, max_keepalive_connections=0)) as client:
+
+            async def one(name: str, port: int):
+                async with self.sem:
+                    return await audit_tls(name, port, http_client=client)
+
+            for result in await asyncio.gather(*(one(n, p) for n, p in targets)):
+                self.s.findings.extend(result)
+
+    async def probe_login_paths(self, client: httpx.AsyncClient) -> None:
+        """GET a small, constant set of known remote-access login paths on web hosts."""
+        hosts = [h for h in self.s.hosts.values()
+                 if h.resolved and not h.wildcard and any(s.status is not None for s in h.http)]
+        if not hosts:
+            return
+        self.s.findings.extend(await scan_login_paths(client, hosts, self.sem, self.log))
+
+    async def credential_exposure(self, client: httpx.AsyncClient) -> None:
+        """Passive credential-exposure reporting (standard+): breach counts by domain,
+        corporate email-format inference, and public-repo secret scanning. Read-only;
+        no authentication, guessing or user enumeration. Skips cleanly without keys/tools."""
+        from .cred_exposure import collect
+        findings = await collect(self.s, self.cfg, client, self.runner, self.log)
+        if findings:
+            self.log(f"[cred] {len(findings)} credential-exposure finding(s)")
+        self.s.findings.extend(findings)
 
     def derive_findings(self) -> None:
         for h in self.s.hosts.values():
@@ -405,10 +510,17 @@ class Pipeline:
                 if not is_subdomain_of(h.name, h.apex):
                     del self.s.hosts[h.name]
 
+            if cfg.http_probe:
+                await self.probe_login_paths(probe_client)
+            await self.network_seed(src_client)
             await self.enrich_ips()
+            await self.cloud_recon(src_client)
             await self.takeovers()
             if cfg.active:
                 await self.port_scan(probe_client)
+            await self.protocol_hygiene()
+            if cfg.http_probe:  # passive, but standard mode and above only
+                await self.credential_exposure(src_client)
             self.derive_findings()
             self.checkpoint(self.s)
         finally:
