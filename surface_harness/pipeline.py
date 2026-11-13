@@ -23,14 +23,17 @@ import httpx
 
 from .company import Registries, candidate_names, site_identity
 from .config import DEFAULT_PORTS, Config
+from .dns_audit import audit_dns
 from .dns_ops import Dns, load_wordlist
 from .domains import apex, is_subdomain_of, normalize
+from .email_sec import assess_email_security
 from .models import ApexDomain, Finding, Host, IpInfo, Surface
 from .ports import SHARED_EDGE_AS, nmap_services, scan
 from .probe import http_probe, tls_grab
 from .related import RelatedDiscovery
 from .sources import UA, enumerate_passive
 from .takeover import assess
+from .tls_audit import audit_tls
 from .tools import ToolRunner
 
 SENSITIVE_PORTS = {
@@ -323,6 +326,39 @@ class Pipeline:
             self.log(f"[http] probing {len(extra)} non-standard web ports")
             await asyncio.gather(*(one(h, u) for h, u in extra))
 
+    async def protocol_hygiene(self) -> None:
+        """Grade protocol hygiene from DNS + light TLS probes: email authentication
+        (SPF/DMARC/DKIM/MTA-STS/TLS-RPT) and DNS hygiene (AXFR/DNSSEC/CAA/dangling NS)
+        for every in-scope apex, plus a TLS-config audit of live TLS hosts."""
+        cfg = self.cfg
+        apexes = [d for d in self.s.in_scope_apexes(cfg.expand_threshold) if not self.excluded(d.name)]
+        self.log(f"[hygiene] email + DNS checks on {len(apexes)} apex domain(s)")
+        for d in apexes:
+            self.s.findings.extend(await assess_email_security(self.dns, d.name))
+            self.s.findings.extend(await audit_dns(self.dns, d.name))
+
+        if not cfg.http_probe:
+            return
+        targets: list[tuple[str, int]] = []
+        for h in self.s.hosts.values():
+            if not h.resolved or h.wildcard:
+                continue
+            ports = {t.port for t in h.tls} | {p for p in h.open_ports if p in WEB_PORTS_TLS}
+            targets.extend((h.name, p) for p in sorted(ports))
+        if not targets:
+            return
+        self.log(f"[hygiene] TLS config audit on {len(targets)} host:port endpoint(s)")
+        async with httpx.AsyncClient(
+                verify=False, follow_redirects=False, timeout=6.0,  # noqa: S501
+                limits=httpx.Limits(max_connections=cfg.concurrency, max_keepalive_connections=0)) as client:
+
+            async def one(name: str, port: int):
+                async with self.sem:
+                    return await audit_tls(name, port, http_client=client)
+
+            for result in await asyncio.gather(*(one(n, p) for n, p in targets)):
+                self.s.findings.extend(result)
+
     def derive_findings(self) -> None:
         for h in self.s.hosts.values():
             for svc in h.http:
@@ -409,6 +445,7 @@ class Pipeline:
             await self.takeovers()
             if cfg.active:
                 await self.port_scan(probe_client)
+            await self.protocol_hygiene()
             self.derive_findings()
             self.checkpoint(self.s)
         finally:
