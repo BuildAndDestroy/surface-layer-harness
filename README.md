@@ -231,9 +231,13 @@ seeds ─► RDAP registrant data
                                    │   RDAP registrant match, reverse WHOIS (key), brand-name match
         resolve (A/AAAA/CNAME, wildcard detection)
         HTTP/TLS probe ────────────┘   redirects, live cert SANs, cert O= → fed back as evidence
+  └─► network seeding (CIDR/ASN scope input → host IPs, capped; ASN prefixes via RIPEstat)
   └─► IP enrichment (ASN/prefix/PTR via Team Cymru DNS)
+  └─► cloud recon (S3/GCS/Azure bucket existence; Microsoft 365 tenant/federation)
   └─► takeover checks (dangling CNAMEs + service fingerprints)
-  └─► port scan + nmap -sV on open ports (active; skips shared CDN/WAF IPs)
+  └─► port scan + nmap -sV on open ports, UDP VPN probes (active; skips shared CDN/WAF IPs)
+  └─► protocol hygiene (email auth SPF/DMARC/DKIM/MTA-STS, TLS config, DNS AXFR/DNSSEC/CAA)
+  └─► credential exposure (HIBP breach counts, email-format, gitleaks public-repo secrets)
   └─► findings + report
 ```
 
@@ -313,7 +317,15 @@ Each binary runs locally if it's on `PATH`, otherwise via `docker run --rm surfa
 | IP → ASN / prefix / country | [Team Cymru](https://www.team-cymru.com/ip-asn-mapping) DNS (`origin.asn.cymru.com`) | all | none |
 | HTTP probing (status, title, server, tech, redirects) | httpx (Python) | standard, active | none |
 | TLS certificate grab (SANs, issuer, O=, validity) | Python `ssl` + cryptography | standard, active | none |
+| TLS config audit (SSLv3/TLS1.0/1.1 support, cert expiry, missing HSTS) | per-version `ssl` handshakes | standard, active | none |
+| Email-auth grading (SPF `+all`/lookup count, DMARC `p=`, DKIM selectors, MTA-STS/TLS-RPT) | dnspython TXT lookups | all | none |
+| DNS hygiene (AXFR zone transfer, DNSSEC, CAA, dangling NS) | dnspython | all | none |
 | Subdomain takeover checks | built-in CNAME/service fingerprints | all (fingerprints need standard) | none |
+| Remote-access detection (VPN/RDP/Citrix/admin ports, product fingerprints, known login-path GETs) | built-in fingerprints + httpx | ports: active; fingerprints/paths: standard | none |
+| UDP VPN probes (IKE/IPsec, IKE-NATT, OpenVPN, WireGuard) | single-packet asyncio datagram probes | active | none |
+| Network seeding from CIDR/ASN input | `ipaddress` expansion (capped) + [RIPEstat](https://stat.ripe.net) ASN→prefixes | all | none |
+| Cloud-asset discovery (S3/GCS/Azure bucket existence, Microsoft 365 tenant/federation) | passive HTTP to provider endpoints | buckets: standard, active; M365: all | none |
+| Credential exposure (breach counts, email-format inference, public-repo secrets) | [HIBP](https://haveibeenpwned.com) + optional `gitleaks` | standard, active | `HIBP_API_KEY` (HIBP only) |
 | Registrable-domain parsing | tldextract with an offline Public Suffix List | all | none |
 
 ### Passive subdomain sources (HTTP APIs)
@@ -431,7 +443,7 @@ See [Tools, data sources and API keys](#tools-data-sources-and-api-keys).
 | `candidates.tsv` | Related domains needing review, with their evidence |
 | `hosts.txt` / `all_hosts.txt` | Live non-wildcard hosts / every name discovered |
 | `urls.txt`, `ips.txt` | Responding web URLs / all resolved IPs |
-| `findings.tsv` | Takeover candidates, exposed services and admin panels, invalid TLS, non-prod hosts, org-owned ASNs |
+| `findings.tsv` | Takeover candidates, exposed services, remote-access/admin interfaces, invalid or weak TLS, missing HSTS, email-auth gaps (SPF/DMARC/DKIM), DNS hygiene (AXFR/dangling NS), exposed cloud buckets, Microsoft 365 tenant/federation, credential/breach exposure, non-prod hosts, org-owned ASNs |
 
 Results are checkpointed after every round. Ctrl-C writes partial results.
 
@@ -470,6 +482,14 @@ surface_harness/
   company.py    website identity, business registries, registered-agent handling
   dns_ops.py    resolution, wildcard detection, brute force, ASN/PTR
   probe.py      HTTP probing, tech hints, TLS cert collection
+  email_sec.py  SPF/DMARC/DKIM/MTA-STS/TLS-RPT grading
+  tls_audit.py  TLS protocol-version, cert-expiry and HSTS audit
+  dns_audit.py  AXFR, DNSSEC, CAA, dangling-NS checks
+  login_paths.py known remote-access login-path probing
+  udp_probe.py  UDP VPN presence probes (IKE/IPsec, OpenVPN, WireGuard)
+  networks.py   CIDR/ASN scope expansion (RIPEstat ASN→prefixes)
+  cloud.py      S3/GCS/Azure bucket + Microsoft 365 tenant discovery
+  cred_exposure.py passive breach/email-format/public-repo-secret reporting
   takeover.py   subdomain takeover fingerprints
   ports.py      naabu / built-in scanner, nmap service detection
   tools.py      local-or-Docker tool runner
