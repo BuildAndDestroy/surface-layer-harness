@@ -397,8 +397,10 @@ class Pipeline:
         if not targets:
             return
         self.log(f"[hygiene] TLS config audit on {len(targets)} host:port endpoint(s)")
+        # Verified client: the HSTS header check is only meaningful on a valid cert
+        # (see audit_tls); weak/invalid certs are reported by the tls-* findings.
         async with httpx.AsyncClient(
-                verify=False, follow_redirects=False, timeout=6.0,  # noqa: S501
+                follow_redirects=False, timeout=6.0,
                 limits=httpx.Limits(max_connections=cfg.concurrency, max_keepalive_connections=0)) as client:
 
             async def one(name: str, port: int):

@@ -51,7 +51,10 @@ async def _check_hsts(host: str, port: int, timeout: float,
         if http_client is not None:
             resp = await http_client.get(url, headers={"User-Agent": UA})
         else:
-            async with httpx.AsyncClient(verify=False, follow_redirects=False,  # noqa: S501
+            # Verify certs here: a browser ignores HSTS on an untrusted cert, so a
+            # missing-HSTS finding is only meaningful when the cert validates. Hosts
+            # with invalid/weak certs are already covered by the tls-* findings above.
+            async with httpx.AsyncClient(follow_redirects=False,
                                          timeout=timeout) as client:
                 resp = await client.get(url, headers={"User-Agent": UA})
     except Exception:  # noqa: BLE001 - no HTTPS response means no HSTS finding to make
