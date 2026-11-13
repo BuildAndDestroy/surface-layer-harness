@@ -151,6 +151,90 @@ class Finding:
     status: str
 
 
+@strawberry.type(description="Email-authentication posture for one apex domain.")
+class EmailSecurity:
+    target_id: str
+    domain: str
+    spf: str | None
+    spf_all: str | None = strawberry.field(description="the 'all' qualifier: +all | ~all | -all | ?all")
+    spf_lookups: int | None
+    spf_records: int
+    dmarc: str | None
+    dmarc_policy: str | None = strawberry.field(description="none | quarantine | reject")
+    dmarc_pct: int
+    dmarc_rua: bool
+    dkim_selectors: list[str]
+    mta_sts: bool
+    tls_rpt: bool
+
+
+@strawberry.type(description="DNS-hygiene posture for one apex domain.")
+class DnsHygiene:
+    target_id: str
+    domain: str
+    nameservers: list[str]
+    axfr: bool = strawberry.field(description="a nameserver allowed a zone transfer")
+    dnssec: bool
+    caa: bool
+    dangling_ns: list[str]
+
+
+@strawberry.type(description="TLS-configuration posture for one host:port.")
+class TlsConfig:
+    target_id: str
+    host: str
+    port: int
+    weak_protocols: list[str] = strawberry.field(description="legacy protocols accepted, e.g. TLSv1.0")
+    hsts: bool | None
+    not_after: str | None
+    expires_in_days: int | None
+
+
+@strawberry.type(description="A public cloud storage bucket found to exist.")
+class CloudAsset:
+    target_id: str
+    name: str
+    provider: str = strawberry.field(description="s3 | gcs | azure")
+    url: str
+    state: str = strawberry.field(description="public (listable) | private (exists, denied)")
+
+
+@strawberry.type(description="A Microsoft 365 / Entra tenant backing a domain.")
+class M365Tenant:
+    target_id: str
+    domain: str
+    tenant_id: str | None
+    namespace: str | None = strawberry.field(description="Managed | Federated")
+    federation_host: str | None
+    federation_brand: str | None
+
+
+@strawberry.type
+class BreachItem:
+    name: str
+    year: str | None
+    accounts: int
+
+
+@strawberry.type(description="Aggregated breach exposure for one domain (counts only).")
+class BreachExposure:
+    target_id: str
+    domain: str
+    accounts: int
+    breach_count: int
+    breaches: list[BreachItem]
+
+
+@strawberry.type(description="Inferred corporate email format for one domain.")
+class EmailFormat:
+    target_id: str
+    domain: str
+    format: str
+    template: str
+    samples: int
+    considered: int
+
+
 @strawberry.type
 class Officer:
     name: str
@@ -215,6 +299,63 @@ def _findings(t: dict) -> list[Finding]:
                     detail=f.get("title", ""), status=f.get("status", ""))
             for f in (t.get("analysis") or {}).get("findings", [])]
     return out
+
+
+def _email_security(t: dict) -> list[EmailSecurity]:
+    s = t.get("surface") or {}
+    return [EmailSecurity(target_id=t["id"], domain=r.get("domain", k), spf=r.get("spf"),
+                          spf_all=r.get("spf_all"), spf_lookups=r.get("spf_lookups"),
+                          spf_records=r.get("spf_records", 0), dmarc=r.get("dmarc"),
+                          dmarc_policy=r.get("dmarc_policy"), dmarc_pct=r.get("dmarc_pct", 100),
+                          dmarc_rua=bool(r.get("dmarc_rua")), dkim_selectors=r.get("dkim_selectors", []),
+                          mta_sts=bool(r.get("mta_sts")), tls_rpt=bool(r.get("tls_rpt")))
+            for k, r in (s.get("email_security") or {}).items()]
+
+
+def _dns_hygiene(t: dict) -> list[DnsHygiene]:
+    s = t.get("surface") or {}
+    return [DnsHygiene(target_id=t["id"], domain=r.get("domain", k), nameservers=r.get("nameservers", []),
+                       axfr=bool(r.get("axfr")), dnssec=bool(r.get("dnssec")), caa=bool(r.get("caa")),
+                       dangling_ns=r.get("dangling_ns", []))
+            for k, r in (s.get("dns_hygiene") or {}).items()]
+
+
+def _tls_config(t: dict) -> list[TlsConfig]:
+    s = t.get("surface") or {}
+    return [TlsConfig(target_id=t["id"], host=r["host"], port=r["port"],
+                      weak_protocols=r.get("weak_protocols", []), hsts=r.get("hsts"),
+                      not_after=r.get("not_after"), expires_in_days=r.get("expires_in_days"))
+            for r in (s.get("tls_config") or [])]
+
+
+def _cloud_assets(t: dict) -> list[CloudAsset]:
+    s = t.get("surface") or {}
+    return [CloudAsset(target_id=t["id"], name=r["name"], provider=r["provider"], url=r["url"],
+                       state=r["state"]) for r in (s.get("cloud_assets") or [])]
+
+
+def _m365(t: dict) -> list[M365Tenant]:
+    s = t.get("surface") or {}
+    return [M365Tenant(target_id=t["id"], domain=r["domain"], tenant_id=r.get("tenant_id"),
+                       namespace=r.get("namespace"), federation_host=r.get("federation_host"),
+                       federation_brand=r.get("federation_brand"))
+            for r in (s.get("m365_tenants") or [])]
+
+
+def _breaches(t: dict) -> list[BreachExposure]:
+    s = t.get("surface") or {}
+    return [BreachExposure(target_id=t["id"], domain=r["domain"], accounts=r.get("accounts", 0),
+                           breach_count=r.get("breach_count", 0),
+                           breaches=[BreachItem(name=b.get("name", ""), year=b.get("year"),
+                                                accounts=b.get("accounts", 0)) for b in r.get("breaches", [])])
+            for r in (s.get("breaches") or [])]
+
+
+def _email_formats(t: dict) -> list[EmailFormat]:
+    s = t.get("surface") or {}
+    return [EmailFormat(target_id=t["id"], domain=r["domain"], format=r["format"],
+                        template=r.get("template", ""), samples=r.get("samples", 0),
+                        considered=r.get("considered", 0)) for r in (s.get("email_formats") or [])]
 
 
 def _entities(t: dict) -> list[LegalEntity]:
@@ -290,6 +431,34 @@ class Target:
     @strawberry.field
     def ports(self, port: int | None = None) -> list[OpenPort]:
         return [p for p in _ports(_targets(self.id)[0]) if port in (None, p.port)]
+
+    @strawberry.field
+    def email_security(self) -> list[EmailSecurity]:
+        return _email_security(_targets(self.id)[0])
+
+    @strawberry.field
+    def dns_hygiene(self) -> list[DnsHygiene]:
+        return _dns_hygiene(_targets(self.id)[0])
+
+    @strawberry.field
+    def tls_config(self) -> list[TlsConfig]:
+        return _tls_config(_targets(self.id)[0])
+
+    @strawberry.field
+    def cloud_assets(self) -> list[CloudAsset]:
+        return _cloud_assets(_targets(self.id)[0])
+
+    @strawberry.field
+    def m365_tenants(self) -> list[M365Tenant]:
+        return _m365(_targets(self.id)[0])
+
+    @strawberry.field
+    def breaches(self) -> list[BreachExposure]:
+        return _breaches(_targets(self.id)[0])
+
+    @strawberry.field
+    def email_formats(self) -> list[EmailFormat]:
+        return _email_formats(_targets(self.id)[0])
 
 
 def _target(t: dict) -> Target:
@@ -381,6 +550,38 @@ class Query:
                      .removeprefix("ssl/"))
                 and (product is None or product.lower() in (p.product or "").lower())
                 and (host is None or host.lower() in p.hosts)]
+
+    @strawberry.field(description="Email-authentication posture per domain across targets.")
+    def email_security(self, target_id: str | None = None) -> list[EmailSecurity]:
+        return [r for t in _targets(target_id) for r in _email_security(t)]
+
+    @strawberry.field(description="DNS-hygiene posture per domain across targets.")
+    def dns_hygiene(self, target_id: str | None = None) -> list[DnsHygiene]:
+        return [r for t in _targets(target_id) for r in _dns_hygiene(t)]
+
+    @strawberry.field(description="TLS-configuration posture per host:port across targets.")
+    def tls_config(self, target_id: str | None = None,
+                   weak_only: bool = False) -> list[TlsConfig]:
+        return [r for t in _targets(target_id) for r in _tls_config(t)
+                if not weak_only or r.weak_protocols]
+
+    @strawberry.field(description="Public cloud storage buckets found across targets.")
+    def cloud_assets(self, target_id: str | None = None,
+                     provider: str | None = None) -> list[CloudAsset]:
+        return [r for t in _targets(target_id) for r in _cloud_assets(t)
+                if provider in (None, r.provider)]
+
+    @strawberry.field(description="Microsoft 365 / Entra tenants discovered across targets.")
+    def m365_tenants(self, target_id: str | None = None) -> list[M365Tenant]:
+        return [r for t in _targets(target_id) for r in _m365(t)]
+
+    @strawberry.field(description="Breach exposure per domain across targets (counts only).")
+    def breaches(self, target_id: str | None = None) -> list[BreachExposure]:
+        return [r for t in _targets(target_id) for r in _breaches(t)]
+
+    @strawberry.field(description="Inferred corporate email formats across targets.")
+    def email_formats(self, target_id: str | None = None) -> list[EmailFormat]:
+        return [r for t in _targets(target_id) for r in _email_formats(t)]
 
     @strawberry.field(description="The node/edge graph (same as graph.json).")
     def graph(self) -> JSON:

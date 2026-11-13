@@ -309,10 +309,14 @@ class Pipeline:
         cfg = self.cfg
         in_scope = [d.name for d in self.s.in_scope_apexes(cfg.expand_threshold)]
         domains = list(dict.fromkeys(self.s.seeds + in_scope))[:12]
-        self.s.findings.extend(await discover_m365(client, domains, self.log))
+        tenants, m365_findings = await discover_m365(client, domains, self.log)
+        self.s.m365_tenants.extend(tenants)
+        self.s.findings.extend(m365_findings)
         if cfg.http_probe:  # bucket probing touches third-party endpoints; standard mode and up
             stems = brand_stems(self.s.seeds, self.s.org_names)
-            self.s.findings.extend(await discover_buckets(client, stems, self.log))
+            assets, bucket_findings = await discover_buckets(client, stems, self.log)
+            self.s.cloud_assets.extend(assets)
+            self.s.findings.extend(bucket_findings)
 
     async def takeovers(self) -> None:
         cands = [h for h in self.s.hosts.values() if h.cnames]
@@ -383,8 +387,12 @@ class Pipeline:
         apexes = [d for d in self.s.in_scope_apexes(cfg.expand_threshold) if not self.excluded(d.name)]
         self.log(f"[hygiene] email + DNS checks on {len(apexes)} apex domain(s)")
         for d in apexes:
-            self.s.findings.extend(await assess_email_security(self.dns, d.name))
-            self.s.findings.extend(await audit_dns(self.dns, d.name))
+            email_rec, email_findings = await assess_email_security(self.dns, d.name)
+            self.s.email_security[d.name] = email_rec
+            self.s.findings.extend(email_findings)
+            dns_rec, dns_findings = await audit_dns(self.dns, d.name)
+            self.s.dns_hygiene[d.name] = dns_rec
+            self.s.findings.extend(dns_findings)
 
         if not cfg.http_probe:
             return
@@ -407,7 +415,8 @@ class Pipeline:
                 async with self.sem:
                     return await audit_tls(name, port, http_client=client)
 
-            for result in await asyncio.gather(*(one(n, p) for n, p in targets)):
+            for record, result in await asyncio.gather(*(one(n, p) for n, p in targets)):
+                self.s.tls_config.append(record)
                 self.s.findings.extend(result)
 
     async def probe_login_paths(self, client: httpx.AsyncClient) -> None:
@@ -423,7 +432,9 @@ class Pipeline:
         corporate email-format inference, and public-repo secret scanning. Read-only;
         no authentication, guessing or user enumeration. Skips cleanly without keys/tools."""
         from .cred_exposure import collect
-        findings = await collect(self.s, self.cfg, client, self.runner, self.log)
+        structured, findings = await collect(self.s, self.cfg, client, self.runner, self.log)
+        self.s.breaches.extend(structured["breaches"])
+        self.s.email_formats.extend(structured["email_formats"])
         if findings:
             self.log(f"[cred] {len(findings)} credential-exposure finding(s)")
         self.s.findings.extend(findings)

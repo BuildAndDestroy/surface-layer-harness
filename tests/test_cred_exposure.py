@@ -194,8 +194,13 @@ def test_collect_graceful_without_keys_or_tools():
                                  officers=[Officer("John Doe", "CEO"), Officer("Jane Roe", "CTO")])]
 
     cfg = Config(seeds=["acme.com"])  # no HIBP key
-    findings = asyncio.run(collect(s, cfg, client=None, runner=NoTools(), log=lambda m: None))
+    structured, findings = asyncio.run(collect(s, cfg, client=None, runner=NoTools(), log=lambda m: None))
     # HIBP + gitleaks skip; only the email-format finding is produced.
     kinds = {f.kind for f in findings}
     assert kinds == {"email-format"}
+    # structured records: no breaches (no key), one inferred email format.
+    assert structured["breaches"] == []
+    assert len(structured["email_formats"]) == 1
+    fmt = structured["email_formats"][0]
+    assert fmt.domain == "acme.com" and fmt.template == "{first}.{last}"
     assert all(SECRET not in f.detail for f in findings)

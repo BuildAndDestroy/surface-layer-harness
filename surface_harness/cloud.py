@@ -17,7 +17,7 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse
 
 from .domains import brand_stem
-from .models import Finding
+from .models import CloudAsset, Finding, M365Tenant
 from .probe import UA
 
 # Tokens that are too generic to make a useful bucket/brand stem on their own.
@@ -91,15 +91,21 @@ def classify_bucket(status: int) -> str | None:
     return None
 
 
-async def discover_buckets(client, stems, log, max_requests: int = 60) -> list[Finding]:
-    """Check guessed bucket names across S3/GCS/Azure. Bounded to ~max_requests GETs."""
+async def discover_buckets(client, stems, log, max_requests: int = 60
+                           ) -> tuple[list[CloudAsset], list[Finding]]:
+    """Check guessed bucket names across S3/GCS/Azure. Bounded to ~max_requests GETs.
+
+    Returns the structured :class:`CloudAsset` records (buckets found to exist) and
+    the findings derived from them.
+    """
     per_provider = max(1, max_requests // len(BUCKET_PROVIDERS))
     names = bucket_candidates(stems, limit=per_provider)
     jobs = [(name, provider, tmpl.format(name=name))
             for name in names for provider, tmpl in BUCKET_PROVIDERS][:max_requests]
     if not jobs:
-        return []
+        return [], []
     log(f"[cloud] checking {len(names)} bucket name(s) across S3/GCS/Azure ({len(jobs)} requests)")
+    assets: list[CloudAsset] = []
     findings: list[Finding] = []
     sem = asyncio.Semaphore(10)
 
@@ -111,14 +117,16 @@ async def discover_buckets(client, stems, log, max_requests: int = 60) -> list[F
                 return
         cat = classify_bucket(r.status_code)
         if cat == "public":
+            assets.append(CloudAsset(name=name, provider=provider, url=url, state="public"))
             findings.append(Finding("medium", "cloud-bucket", url,
                                     f"{provider} bucket '{name}' is publicly listable"))
         elif cat == "private":
+            assets.append(CloudAsset(name=name, provider=provider, url=url, state="private"))
             findings.append(Finding("info", "cloud-bucket", url,
                                     f"{provider} bucket '{name}' exists but access is denied"))
 
     await asyncio.gather(*(check(n, p, u) for n, p, u in jobs))
-    return findings
+    return assets, findings
 
 
 # -- Microsoft 365 / Entra ---------------------------------------------------
@@ -174,12 +182,17 @@ async def _openid_tenant(client, domain: str) -> str | None:
         return None
 
 
-async def discover_m365(client, domains, log) -> list[Finding]:
-    """Passive M365/Entra tenant recon for each candidate mail domain."""
+async def discover_m365(client, domains, log) -> tuple[list[M365Tenant], list[Finding]]:
+    """Passive M365/Entra tenant recon for each candidate mail domain.
+
+    Returns the structured :class:`M365Tenant` records and the findings derived
+    from them.
+    """
+    tenants: list[M365Tenant] = []
     findings: list[Finding] = []
     checked = [d for d in dict.fromkeys(domains) if d]
     if not checked:
-        return findings
+        return tenants, findings
     log(f"[cloud] Microsoft 365 tenant check for {len(checked)} domain(s)")
 
     async def one(domain: str):
@@ -188,6 +201,7 @@ async def discover_m365(client, domains, log) -> list[Finding]:
         if ns.lower() in ("", "unknown"):
             return  # domain is not backed by an Entra/M365 tenant
         tenant = await _openid_tenant(client, domain)
+        rec = M365Tenant(domain=domain, tenant_id=tenant, namespace=ns)
         if tenant:
             findings.append(Finding("info", "m365-tenant", domain,
                                     f"Microsoft 365 / Entra tenant {tenant} ({ns} namespace)"))
@@ -197,11 +211,14 @@ async def discover_m365(client, domains, log) -> list[Finding]:
         if ns.lower() == "federated":
             host = urlparse(realm.get("AuthURL") or "").hostname
             brand = realm.get("FederationBrandName") or ""
+            rec.federation_host = host
+            rec.federation_brand = brand or None
             label = host or brand or "unknown IdP"
             detail = f"federated identity provider: {label}"
             if brand and host:
                 detail += f" (brand '{brand}')"
             findings.append(Finding("info", "m365-federation", domain, detail))
+        tenants.append(rec)
 
     await asyncio.gather(*(one(d) for d in checked))
-    return findings
+    return tenants, findings

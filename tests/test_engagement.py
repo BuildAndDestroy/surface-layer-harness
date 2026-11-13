@@ -6,14 +6,21 @@ import pytest
 from surface_harness.engagement import write_merged
 from surface_harness.models import (
     ApexDomain,
+    BreachExposure,
+    CloudAsset,
     CompanyRecord,
+    DnsHygiene,
+    EmailFormat,
+    EmailSecurity,
     Finding,
     Host,
     HttpService,
     IpInfo,
+    M365Tenant,
     Officer,
     SiteIdentity,
     Surface,
+    TlsConfig,
 )
 from surface_harness.report import write_all
 from surface_harness.scope import ScopeError, load_scope
@@ -60,6 +67,21 @@ def fake_surface(seed: str, shared_ip: str, tid: str) -> Surface:
                                      agent_name="Northwest Registered Agent, LLC", agent_commercial=True,
                                      officers=[Officer("Jane Doe", "manager")]))
     s.site_identity[seed] = SiteIdentity(seed, same_as={"https://github.com/" + tid})
+    # structured posture records
+    s.email_security[seed] = EmailSecurity(domain=seed, spf="v=spf1 -all", spf_all="-all",
+                                           spf_lookups=1, spf_records=1, dmarc_policy="none",
+                                           dmarc_rua=True, dkim_selectors=["google"], mta_sts=True)
+    s.dns_hygiene[seed] = DnsHygiene(domain=seed, nameservers=[f"ns1.{seed}"], dnssec=False, caa=True)
+    s.tls_config.append(TlsConfig(host=f"www.{seed}", port=443, weak_protocols=["TLSv1.0"],
+                                  hsts=False, not_after="2027-01-01T00:00:00", expires_in_days=400))
+    s.m365_tenants.append(M365Tenant(domain=seed, tenant_id="11111111-2222-3333-4444-555555555555",
+                                     namespace="Federated", federation_host="adfs." + seed))
+    s.cloud_assets.append(CloudAsset(name=tid + "-backup", provider="s3",
+                                     url=f"https://{tid}-backup.s3.amazonaws.com", state="public"))
+    s.breaches.append(BreachExposure(domain=seed, accounts=1200, breach_count=2,
+                                     breaches=[{"name": "Adobe", "year": "2013", "accounts": 1000}]))
+    s.email_formats.append(EmailFormat(domain=seed, format="{first}.{last}@" + seed,
+                                       template="{first}.{last}", samples=3, considered=5))
     return s
 
 
@@ -136,6 +158,13 @@ def test_graphql(eng):
       domains(inScopeOnly: true) { name confidence }
       findings(minSeverity: "low") { targetId severity origin }
       byKind: findings(kind: "exposed-interface") { targetId kind origin }
+      emailSecurity(targetId: "acme") { domain spfAll dmarcPolicy dkimSelectors mtaSts }
+      dnsHygiene(targetId: "acme") { domain caa dnssec nameservers }
+      tlsConfig(weakOnly: true) { host port weakProtocols hsts }
+      m365Tenants(targetId: "acme") { domain tenantId namespace federationHost }
+      cloudAssets(provider: "s3") { name provider state url }
+      breaches(targetId: "acme") { domain accounts breachCount breaches { name year accounts } }
+      emailFormats(targetId: "acme") { domain format template samples }
       ports(service: "https") { targetId ip port hosts web { status url } }
       ips(targetId: "acme") { ip openPorts }
       redis: ports(port: 6379, targetId: "beta") { hosts product version cpe detection nmap }
@@ -152,6 +181,19 @@ def test_graphql(eng):
     assert d["findings"][0]["severity"] == "high"
     assert d["byKind"] and all(f["kind"] == "exposed-interface" and f["origin"] == "harness"
                                for f in d["byKind"])
+    assert d["emailSecurity"] == [{"domain": "acme.com", "spfAll": "-all", "dmarcPolicy": "none",
+                                   "dkimSelectors": ["google"], "mtaSts": True}]
+    assert d["dnsHygiene"] == [{"domain": "acme.com", "caa": True, "dnssec": False,
+                                "nameservers": ["ns1.acme.com"]}]
+    assert d["tlsConfig"] == [{"host": "www.acme.com", "port": 443, "weakProtocols": ["TLSv1.0"],
+                               "hsts": False}, {"host": "www.beta.io", "port": 443,
+                               "weakProtocols": ["TLSv1.0"], "hsts": False}]
+    assert d["m365Tenants"][0]["namespace"] == "Federated" and d["m365Tenants"][0]["federationHost"] == "adfs.acme.com"
+    assert {a["name"] for a in d["cloudAssets"]} == {"acme-backup", "beta-backup"}
+    assert d["breaches"] == [{"domain": "acme.com", "accounts": 1200, "breachCount": 2,
+                              "breaches": [{"name": "Adobe", "year": "2013", "accounts": 1000}]}]
+    assert d["emailFormats"] == [{"domain": "acme.com", "format": "{first}.{last}@acme.com",
+                                  "template": "{first}.{last}", "samples": 3}]
     assert {(p["targetId"], p["port"]) for p in d["ports"]} == {("acme", 443), ("beta", 443)}
     assert d["ports"][0]["web"] == [{"status": 200, "url": "https://www.acme.com/"}]
     assert d["ips"] == [{"ip": "1.1.1.1", "openPorts": [443, 6379]}]

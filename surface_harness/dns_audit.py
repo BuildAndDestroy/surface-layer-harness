@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 import dns.query
 import dns.zone
 
-from .models import Finding
+from .models import DnsHygiene, Finding
 
 if TYPE_CHECKING:
     from .dns_ops import Dns
@@ -31,14 +31,16 @@ def _try_axfr(ns_ip: str, apex_name: str, timeout: float) -> int | None:
         return None
 
 
-async def audit_dns(dns_client: Dns, apex_name: str) -> list[Finding]:
+async def audit_dns(dns_client: Dns, apex_name: str) -> tuple[DnsHygiene, list[Finding]]:
     """Audit DNS hygiene for ``apex_name``.
 
-    Kinds returned: ``dns-axfr`` (high), ``dangling-ns`` (medium),
+    Returns the structured :class:`DnsHygiene` record and the findings derived
+    from it. Finding kinds: ``dns-axfr`` (high), ``dangling-ns`` (medium),
     ``dnssec-missing`` (info), ``caa-missing`` (info).
     """
     findings: list[Finding] = []
     nameservers = await dns_client.query(apex_name, "NS")
+    record = DnsHygiene(domain=apex_name, nameservers=sorted(nameservers))
 
     # AXFR: try a zone transfer against the first address of each nameserver.
     for ns_name in nameservers:
@@ -47,6 +49,7 @@ async def audit_dns(dns_client: Dns, apex_name: str) -> list[Finding]:
             continue
         count = await asyncio.to_thread(_try_axfr, ips[0], apex_name, AXFR_TIMEOUT)
         if count is not None:
+            record.axfr = True
             findings.append(Finding("high", "dns-axfr", apex_name,
                                     f"zone transfer (AXFR) allowed by {ns_name} ({ips[0]}); "
                                     f"{count} records exposed"))
@@ -54,19 +57,22 @@ async def audit_dns(dns_client: Dns, apex_name: str) -> list[Finding]:
     # Dangling delegation: a nameserver whose own name is NXDOMAIN is hijackable.
     for ns_name in nameservers:
         if await dns_client.exists(ns_name) == "nxdomain":
+            record.dangling_ns.append(ns_name)
             findings.append(Finding("medium", "dangling-ns", apex_name,
                                     f"delegated nameserver {ns_name} does not resolve (NXDOMAIN); "
                                     "subdomain/zone-hijack risk"))
 
     dnskey, ds = await asyncio.gather(
         dns_client.query(apex_name, "DNSKEY"), dns_client.query(apex_name, "DS"))
-    if not dnskey and not ds:
+    record.dnssec = bool(dnskey or ds)
+    if not record.dnssec:
         findings.append(Finding("info", "dnssec-missing", apex_name,
                                 "no DNSKEY/DS records; the zone is not DNSSEC-signed"))
 
     caa = await dns_client.query(apex_name, "CAA")
-    if not caa:
+    record.caa = bool(caa)
+    if not record.caa:
         findings.append(Finding("info", "caa-missing", apex_name,
                                 "no CAA record; any certificate authority may issue for this domain"))
 
-    return findings
+    return record, findings

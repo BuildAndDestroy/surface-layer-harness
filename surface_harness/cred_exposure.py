@@ -142,16 +142,24 @@ def breach_finding(domain: str, summary: dict) -> Finding | None:
     return Finding(_breach_severity(accounts), "breach-exposure", domain, detail)
 
 
-async def breach_exposure_findings(client: httpx.AsyncClient, domains: list[str], api_key: str,
-                                   log: Callable[[str], None]) -> list[Finding]:
+async def breach_exposure(client: httpx.AsyncClient, domains: list[str], api_key: str,
+                          log: Callable[[str], None]) -> tuple[list, list[Finding]]:
+    """HIBP breach-by-domain for each domain.
+
+    Returns the structured :class:`BreachExposure` records (counts only) and the
+    findings derived from them. Skips cleanly without an API key.
+    """
+    from .models import BreachExposure
+
     if not api_key:
         log("[cred] HIBP_API_KEY not set: skipping breach-exposure lookups")
-        return []
+        return [], []
     try:
         meta = await hibp_breaches_meta(client)
     except Exception as e:  # noqa: BLE001 - metadata is best-effort; names still work without dates
         log(f"[cred] HIBP breach metadata unavailable: {type(e).__name__}")
         meta = {}
+    records: list = []
     findings: list[Finding] = []
     for domain in domains:
         try:
@@ -160,12 +168,23 @@ async def breach_exposure_findings(client: httpx.AsyncClient, domains: list[str]
             log(f"[cred:hibp] {domain}: {type(e).__name__}: {str(e)[:120]}")
             continue
         summary = summarize_breached_domain(breached, meta)
+        if summary["accounts"] <= 0:
+            continue
+        records.append(BreachExposure(domain=domain, accounts=summary["accounts"],
+                                      breach_count=summary["breach_count"],
+                                      breaches=summary["breaches"]))
         f = breach_finding(domain, summary)
         if f:
             log(f"[cred:hibp] {domain}: {summary['accounts']} account(s), "
                 f"{summary['breach_count']} breach(es)")
             findings.append(f)
-    return findings
+    return records, findings
+
+
+async def breach_exposure_findings(client: httpx.AsyncClient, domains: list[str], api_key: str,
+                                   log: Callable[[str], None]) -> list[Finding]:
+    """Findings-only wrapper over :func:`breach_exposure` (back-compat)."""
+    return (await breach_exposure(client, domains, api_key, log))[1]
 
 
 # ---------------------------------------------------------------------------
@@ -388,16 +407,24 @@ async def repo_secret_findings(runner, repos: list[str], log: Callable[[str], No
 # Entry point used by the pipeline
 
 async def collect(s: Surface, cfg: Config, client: httpx.AsyncClient, runner,
-                  log: Callable[[str], None]) -> list[Finding]:
-    """Run all passive credential-exposure checks and return their findings."""
+                  log: Callable[[str], None]) -> tuple[dict, list[Finding]]:
+    """Run all passive credential-exposure checks.
+
+    Returns ``({"breaches": [...], "email_formats": [...]}, findings)`` - the
+    structured records (counts/metadata only, never credentials) and the findings.
+    """
+    from .models import EmailFormat
+
     domains = sorted({d.name for d in s.in_scope_apexes(cfg.expand_threshold)})
 
     # Names help resolve {first}/{last} ordering in email formats.
     person_names = [o.name for c in s.companies for o in c.officers if o.name]
 
     findings: list[Finding] = []
-    findings += await breach_exposure_findings(client, domains, cfg.keys.get("hibp", ""), log)
+    breaches, breach_findings = await breach_exposure(client, domains, cfg.keys.get("hibp", ""), log)
+    findings += breach_findings
 
+    email_formats: list = []
     for domain in domains:
         emails: set[str] = set()
         ident = s.site_identity.get(domain)
@@ -406,7 +433,10 @@ async def collect(s: Surface, cfg: Config, client: httpx.AsyncClient, runner,
         inferred = infer_email_format(sorted(emails), domain, person_names)
         if inferred:
             log(f"[cred:email] {domain}: format {inferred['format']}")
+            email_formats.append(EmailFormat(domain=domain, format=inferred["format"],
+                                             template=inferred["template"], samples=inferred["samples"],
+                                             considered=inferred["considered"]))
             findings.append(email_format_finding(inferred))
 
     findings += await repo_secret_findings(runner, known_repos(s), log)
-    return findings
+    return {"breaches": breaches, "email_formats": email_formats}, findings
