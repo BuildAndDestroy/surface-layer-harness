@@ -7,6 +7,7 @@ It binds to localhost by default: engagement data is client-confidential.
 
 Example query:
     { targets { id name summary findings(minSeverity: "medium") { severity kind target detail } } }
+    { findings(kind: "email-spf") { targetId severity target detail } }
 """
 
 from __future__ import annotations
@@ -274,8 +275,9 @@ class Target:
         return [h for h in _hosts(_targets(self.id)[0]) if live is None or h.live == live]
 
     @strawberry.field
-    def findings(self, min_severity: str | None = None) -> list[Finding]:
-        return [f for f in _findings(_targets(self.id)[0]) if _sev_ok(f.severity, min_severity)]
+    def findings(self, min_severity: str | None = None, kind: str | None = None) -> list[Finding]:
+        return [f for f in _findings(_targets(self.id)[0])
+                if _sev_ok(f.severity, min_severity) and kind in (None, f.kind)]
 
     @strawberry.field
     def entities(self) -> list[LegalEntity]:
@@ -350,11 +352,13 @@ class Query:
         return [d for t in _targets(target_id) for d in _domains(t)
                 if d.confidence >= min_confidence and (d.in_scope or not in_scope_only)]
 
-    @strawberry.field
+    @strawberry.field(description="Findings across targets. `kind` is an exact match on the finding kind "
+                                  "(e.g. email-spf, tls-weak-protocol, cloud-bucket, breach-exposure).")
     def findings(self, target_id: str | None = None, min_severity: str | None = None,
-                 origin: str | None = None) -> list[Finding]:
+                 origin: str | None = None, kind: str | None = None) -> list[Finding]:
         out = [f for t in _targets(target_id) for f in _findings(t)
-               if _sev_ok(f.severity, min_severity) and origin in (None, f.origin)]
+               if _sev_ok(f.severity, min_severity) and origin in (None, f.origin)
+               and kind in (None, f.kind)]
         return sorted(out, key=lambda f: (SEV.get(f.severity, 9), f.target_id))
 
     @strawberry.field
