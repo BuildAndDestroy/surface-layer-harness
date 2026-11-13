@@ -110,6 +110,90 @@ class Finding:
 
 
 @dataclass
+class EmailSecurity:
+    """Structured email-authentication posture for one apex domain."""
+
+    domain: str
+    spf: str | None = None            # raw v=spf1 record, if exactly one is published
+    spf_all: str | None = None        # the 'all' qualifier: +all | ~all | -all | ?all | None
+    spf_lookups: int | None = None    # count of DNS-lookup mechanisms (RFC 7208 §4.6.4)
+    spf_records: int = 0              # how many v=spf1 records exist (>1 is a PermError)
+    dmarc: str | None = None          # raw _dmarc record
+    dmarc_policy: str | None = None   # none | quarantine | reject | None (no/invalid record)
+    dmarc_pct: int = 100
+    dmarc_rua: bool = False           # an aggregate-report address is configured
+    dkim_selectors: list[str] = field(default_factory=list)  # common selectors found
+    mta_sts: bool = False
+    tls_rpt: bool = False
+
+
+@dataclass
+class DnsHygiene:
+    """Structured DNS-hygiene posture for one apex domain."""
+
+    domain: str
+    nameservers: list[str] = field(default_factory=list)
+    axfr: bool = False                # a nameserver allowed a zone transfer
+    dnssec: bool = False              # DNSKEY/DS present
+    caa: bool = False                 # a CAA record is published
+    dangling_ns: list[str] = field(default_factory=list)  # delegated NS that is NXDOMAIN
+
+
+@dataclass
+class TlsConfig:
+    """Structured TLS-configuration posture for one host:port."""
+
+    host: str
+    port: int
+    weak_protocols: list[str] = field(default_factory=list)  # e.g. ["SSLv3", "TLSv1.0"]
+    hsts: bool | None = None          # None = HTTPS not reached / not checked
+    not_after: str | None = None
+    expires_in_days: int | None = None
+
+
+@dataclass
+class CloudAsset:
+    """A public cloud storage bucket that was found to exist."""
+
+    name: str
+    provider: str  # s3 | gcs | azure
+    url: str
+    state: str     # public (listable) | private (exists, access denied)
+
+
+@dataclass
+class M365Tenant:
+    """A Microsoft 365 / Entra tenant backing one domain."""
+
+    domain: str
+    tenant_id: str | None = None
+    namespace: str | None = None          # Managed | Federated
+    federation_host: str | None = None    # IdP host when federated (ADFS / third-party)
+    federation_brand: str | None = None
+
+
+@dataclass
+class BreachExposure:
+    """Aggregated breach exposure for one domain (counts only, never credentials)."""
+
+    domain: str
+    accounts: int = 0        # distinct exposed accounts on the domain
+    breach_count: int = 0
+    breaches: list[dict] = field(default_factory=list)  # [{name, year, accounts}]
+
+
+@dataclass
+class EmailFormat:
+    """Inferred corporate email format for one domain (no addresses retained)."""
+
+    domain: str
+    format: str              # e.g. "{first}.{last}@acme.com"
+    template: str            # e.g. "{first}.{last}"
+    samples: int = 0
+    considered: int = 0
+
+
+@dataclass
 class Officer:
     name: str
     role: str = ""
@@ -169,6 +253,14 @@ class Surface:
     hosts: dict[str, Host] = field(default_factory=dict)
     ips: dict[str, IpInfo] = field(default_factory=dict)
     findings: list[Finding] = field(default_factory=list)
+    # Structured posture captured alongside the findings (same data, queryable fields).
+    email_security: dict[str, EmailSecurity] = field(default_factory=dict)
+    dns_hygiene: dict[str, DnsHygiene] = field(default_factory=dict)
+    tls_config: list[TlsConfig] = field(default_factory=list)
+    cloud_assets: list[CloudAsset] = field(default_factory=list)
+    m365_tenants: list[M365Tenant] = field(default_factory=list)
+    breaches: list[BreachExposure] = field(default_factory=list)
+    email_formats: list[EmailFormat] = field(default_factory=list)
     log: list[str] = field(default_factory=list)
     meta: dict[str, Any] = field(default_factory=dict)
 
@@ -208,5 +300,12 @@ class Surface:
             "hosts": {k: norm(asdict(v)) for k, v in sorted(self.hosts.items())},
             "ips": {k: norm(asdict(v)) for k, v in sorted(self.ips.items())},
             "findings": [asdict(f) for f in self.findings],
+            "email_security": {k: norm(asdict(v)) for k, v in sorted(self.email_security.items())},
+            "dns_hygiene": {k: norm(asdict(v)) for k, v in sorted(self.dns_hygiene.items())},
+            "tls_config": [norm(asdict(t)) for t in self.tls_config],
+            "cloud_assets": [norm(asdict(c)) for c in self.cloud_assets],
+            "m365_tenants": [norm(asdict(m)) for m in self.m365_tenants],
+            "breaches": [norm(asdict(b)) for b in self.breaches],
+            "email_formats": [norm(asdict(e)) for e in self.email_formats],
             "log": self.log,
         }

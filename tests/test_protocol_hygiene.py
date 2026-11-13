@@ -127,7 +127,9 @@ def test_assess_email_security_full_posture():
         ("_mta-sts.acme.com", "TXT"): ["v=STSv1; id=20240101"],
         ("_smtp._tls.acme.com", "TXT"): ["v=TLSRPTv1; rua=mailto:tls@acme.com"],
     }
-    findings = asyncio.run(assess_email_security(FakeDns(recs), "acme.com"))
+    email, findings = asyncio.run(assess_email_security(FakeDns(recs), "acme.com"))
+    assert email.spf_all == "-all" and email.dmarc_policy == "reject" and email.dmarc_rua
+    assert email.dkim_selectors == ["google"] and email.mta_sts and email.tls_rpt
     assert _by_kind(findings, "email-spf") == []  # -all is clean
     assert _by_kind(findings, "email-dmarc") == []  # p=reject + rua is clean
     dkim = _by_kind(findings, "email-dkim")
@@ -140,7 +142,8 @@ def test_assess_email_security_full_posture():
 
 
 def test_assess_email_security_empty_domain():
-    findings = asyncio.run(assess_email_security(FakeDns({}), "bare.example"))
+    email, findings = asyncio.run(assess_email_security(FakeDns({}), "bare.example"))
+    assert email.spf is None and email.dmarc_policy is None and not email.mta_sts
     # missing SPF (medium), missing DMARC (medium), plus info DKIM/MTA-STS/TLS-RPT
     assert _by_kind(findings, "email-spf")[0].severity == "medium"
     assert _by_kind(findings, "email-dmarc")[0].severity == "medium"
@@ -151,7 +154,8 @@ def test_assess_email_security_empty_domain():
 
 def test_assess_email_security_dkim_via_cname():
     recs = {("selector1._domainkey.acme.com", "CNAME"): ["selector1.acme._domainkey.example.net"]}
-    findings = asyncio.run(assess_email_security(FakeDns(recs), "acme.com"))
+    email, findings = asyncio.run(assess_email_security(FakeDns(recs), "acme.com"))
+    assert email.dkim_selectors == ["selector1"]
     dkim = _by_kind(findings, "email-dkim")
     assert dkim and "selector1" in dkim[0].detail
 
@@ -164,7 +168,8 @@ def test_audit_dns_missing_dnssec_and_caa():
         records={("acme.com", "NS"): ["ns1.acme.com"], ("ns1.acme.com", "A"): []},
         exists_map={"ns1.acme.com": "exists"},
     )
-    findings = asyncio.run(audit_dns(dns, "acme.com"))
+    dns_rec, findings = asyncio.run(audit_dns(dns, "acme.com"))
+    assert not dns_rec.dnssec and not dns_rec.caa and dns_rec.nameservers == ["ns1.acme.com"]
     kinds = {f.kind for f in findings}
     assert "dnssec-missing" in kinds and "caa-missing" in kinds
     assert all(f.severity == "info" for f in findings)
@@ -175,7 +180,8 @@ def test_audit_dns_dangling_nameserver():
         records={("acme.com", "NS"): ["ns-gone.acme.com"], ("ns-gone.acme.com", "A"): []},
         exists_map={"ns-gone.acme.com": "nxdomain"},
     )
-    findings = asyncio.run(audit_dns(dns, "acme.com"))
+    dns_rec, findings = asyncio.run(audit_dns(dns, "acme.com"))
+    assert dns_rec.dangling_ns == ["ns-gone.acme.com"]
     dangling = _by_kind(findings, "dangling-ns")
     assert dangling and dangling[0].severity == "medium"
 
@@ -190,5 +196,6 @@ def test_audit_dns_signed_zone_with_caa_is_quiet():
         },
         exists_map={"ns1.acme.com": "exists"},
     )
-    findings = asyncio.run(audit_dns(dns, "acme.com"))
+    dns_rec, findings = asyncio.run(audit_dns(dns, "acme.com"))
+    assert dns_rec.dnssec and dns_rec.caa
     assert findings == []

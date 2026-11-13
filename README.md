@@ -159,7 +159,10 @@ of each target, plus `analysis.json`/`analysis.md` and `summary.md` when present
       "ips":     { "<ip>": { "asn", "as_name", "prefix", "ptr", "hosts" } },
       "companies": [ { "source", "name", "jurisdiction", "agent_name", "agent_commercial",
                        "officers", "parents", "subsidiaries", ... } ],
-      "site_identity": { ... }, "findings": [ ... ], "org_names": [ ... ]
+      "site_identity": { ... }, "findings": [ ... ], "org_names": [ ... ],
+      "email_security": { "<apex>": {...} }, "dns_hygiene": { "<apex>": {...} },
+      "tls_config": [...], "cloud_assets": [...], "m365_tenants": [...],
+      "breaches": [...], "email_formats": [...]
     }
   }],
   "cross_target": { "shared_domains", "shared_ips", "shared_asns" }
@@ -203,9 +206,22 @@ bump the major version, so importers can check the version and fail loudly.
   ips(asn: "13335") { ip hosts openPorts }
   ports(product: "nginx") { targetId ip port service product version cpe detection hosts }
                             # also: port: 6379, service: "redis", ip:, host:, targetId:
+  emailSecurity { domain spfAll dmarcPolicy dmarcPct dkimSelectors mtaSts tlsRpt }
+  dnsHygiene { domain axfr dnssec caa danglingNs nameservers }
+  tlsConfig(weakOnly: true) { host port weakProtocols hsts expiresInDays }
+  cloudAssets(provider: "s3") { name provider state url }
+  m365Tenants { domain tenantId namespace federationHost federationBrand }
+  breaches { domain accounts breachCount breaches { name year accounts } }
+  emailFormats { domain format template samples considered }
   graph   # same as graph.json
 }
 ```
+
+The structured posture objects above carry the same data as the `email-*`, `tls-*`, `dns-*`,
+`cloud-bucket`, `m365-*` and `breach-exposure` findings, but as typed, filterable fields (e.g.
+`tlsConfig(weakOnly: true)`, `cloudAssets(provider: ...)`, or `emailSecurity { dmarcPolicy }` to
+list domains by DMARC posture). Each also appears as a top-level key in `engagement.json`'s
+`surface` object. `findings(kind: ...)` remains the way to get the human-readable detail string.
 
 Open ports (active mode) are recorded per IP, together with `nmap -sV --version-light` results
 (service, product, version, extra info, CPEs, and `detection`: `probed` = fingerprint match,

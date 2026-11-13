@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from .models import Finding
+from .models import EmailSecurity, Finding
 
 if TYPE_CHECKING:
     from .dns_ops import Dns
@@ -117,8 +117,36 @@ def grade_dmarc(apex_name: str, txt_records: list[str]) -> list[Finding]:
     return findings
 
 
-async def assess_email_security(dns: Dns, apex_name: str) -> list[Finding]:
-    """Assess email-authentication posture for ``apex_name`` via DNS lookups."""
+def _email_record(apex_name: str, apex_txt: list[str], dmarc_txt: list[str],
+                  dkim_selectors: list[str], mta_sts: bool, tls_rpt: bool) -> EmailSecurity:
+    """Build the structured EmailSecurity posture from the raw DNS answers."""
+    rec = EmailSecurity(domain=apex_name, dkim_selectors=dkim_selectors,
+                        mta_sts=mta_sts, tls_rpt=tls_rpt)
+    spf = [t for t in apex_txt if t.strip().lower().startswith("v=spf1")]
+    rec.spf_records = len(spf)
+    if spf:
+        rec.spf = spf[0]
+        terms = spf[0].split()
+        qual = _spf_all_qualifier(terms)
+        rec.spf_all = f"{qual}all" if qual else None
+        rec.spf_lookups = _spf_dns_lookups(terms)
+    dmarc = [t for t in dmarc_txt if t.strip().lower().startswith("v=dmarc1")]
+    if dmarc:
+        rec.dmarc = dmarc[0]
+        tags = _parse_dmarc_tags(dmarc[0])
+        rec.dmarc_policy = (tags.get("p") or "").lower() or None
+        pct = tags.get("pct", "")
+        rec.dmarc_pct = int(pct) if pct.isdigit() else 100
+        rec.dmarc_rua = "rua" in tags
+    return rec
+
+
+async def assess_email_security(dns: Dns, apex_name: str) -> tuple[EmailSecurity, list[Finding]]:
+    """Assess email-authentication posture for ``apex_name`` via DNS lookups.
+
+    Returns the structured :class:`EmailSecurity` record and the findings derived
+    from it.
+    """
     findings: list[Finding] = []
 
     apex_txt = await dns.query(apex_name, "TXT")
@@ -143,20 +171,23 @@ async def assess_email_security(dns: Dns, apex_name: str) -> list[Finding]:
                                 f"no DKIM key for common selectors ({', '.join(COMMON_DKIM_SELECTORS)}); "
                                 "DKIM cannot be proven absent"))
 
-    mta_sts = await dns.query(f"_mta-sts.{apex_name}", "TXT")
-    if any(t.lower().startswith("v=stsv1") for t in mta_sts):
+    mta_sts_txt = await dns.query(f"_mta-sts.{apex_name}", "TXT")
+    mta_sts = any(t.lower().startswith("v=stsv1") for t in mta_sts_txt)
+    if mta_sts:
         findings.append(Finding("info", "email-mta-sts", apex_name,
                                 "MTA-STS policy record published (good)"))
     else:
         findings.append(Finding("info", "email-mta-sts", apex_name,
                                 "no MTA-STS policy record; inbound SMTP is open to TLS-downgrade attacks"))
 
-    tls_rpt = await dns.query(f"_smtp._tls.{apex_name}", "TXT")
-    if any(t.lower().startswith("v=tlsrptv1") for t in tls_rpt):
+    tls_rpt_txt = await dns.query(f"_smtp._tls.{apex_name}", "TXT")
+    tls_rpt = any(t.lower().startswith("v=tlsrptv1") for t in tls_rpt_txt)
+    if tls_rpt:
         findings.append(Finding("info", "email-tls-rpt", apex_name,
                                 "SMTP TLS-RPT reporting published (good)"))
     else:
         findings.append(Finding("info", "email-tls-rpt", apex_name,
                                 "no SMTP TLS-RPT record; inbound TLS failures are not reported"))
 
-    return findings
+    record = _email_record(apex_name, apex_txt, dmarc_txt, present, mta_sts, tls_rpt)
+    return record, findings
