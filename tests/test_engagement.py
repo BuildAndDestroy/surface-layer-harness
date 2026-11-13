@@ -135,6 +135,7 @@ def test_graphql(eng):
       hosts(tech: "jenkins") { name targetId http { status title } }
       domains(inScopeOnly: true) { name confidence }
       findings(minSeverity: "low") { targetId severity origin }
+      byKind: findings(kind: "exposed-interface") { targetId kind origin }
       ports(service: "https") { targetId ip port hosts web { status url } }
       ips(targetId: "acme") { ip openPorts }
       redis: ports(port: 6379, targetId: "beta") { hosts product version cpe detection nmap }
@@ -149,6 +150,8 @@ def test_graphql(eng):
     assert {h["name"] for h in d["hosts"]} == {"www.acme.com", "www.beta.io"}
     assert {x["name"] for x in d["domains"]} == {"acme.com", "beta.io"}
     assert d["findings"][0]["severity"] == "high"
+    assert d["byKind"] and all(f["kind"] == "exposed-interface" and f["origin"] == "harness"
+                               for f in d["byKind"])
     assert {(p["targetId"], p["port"]) for p in d["ports"]} == {("acme", 443), ("beta", 443)}
     assert d["ports"][0]["web"] == [{"status": 200, "url": "https://www.acme.com/"}]
     assert d["ips"] == [{"ip": "1.1.1.1", "openPorts": [443, 6379]}]

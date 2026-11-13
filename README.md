@@ -197,6 +197,7 @@ bump the major version, so importers can check the version and fail loudly.
     entities { name source jurisdiction agentName agentCommercial officers { name role } }
     findings(minSeverity: "medium") { origin severity status detail target }
   }
+  emailAuth: findings(kind: "email-spf") { targetId severity target detail }
   hosts(tech: "jenkins", live: true) { targetId name http { url status title } }
   domains(inScopeOnly: true) { targetId name confidence evidence { signal detail } }
   ips(asn: "13335") { ip hosts openPorts }
