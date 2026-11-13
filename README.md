@@ -44,6 +44,8 @@ targets:
     name: "Acme Inc."
     domains: [acme.com, acme.io]
     org: ["Acme Inc."]
+    networks: [203.0.113.0/24]   # optional in-scope IP ranges (CIDRs), expanded to host IPs
+    asns: [AS64500]              # optional in-scope ASNs; prefixes fetched passively via RIPEstat
   - id: acme-eu
     name: "Acme Europe GmbH"
     domains: [acme.eu]

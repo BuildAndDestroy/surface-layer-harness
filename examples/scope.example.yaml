@@ -16,6 +16,9 @@ targets:
     name: "HackerOne Inc."
     domains: [hackerone.com]
     org: ["HackerOne Inc."]
+    # Optional non-domain scope. Only list ranges/ASNs the contract actually covers.
+    # networks: [203.0.113.0/24]   # in-scope IP ranges (CIDRs), expanded to host IPs for DNS/PTR
+    # asns: [AS64500]              # in-scope ASNs; prefixes are fetched passively via RIPEstat
   - id: harvestrangelabs
     name: "Harvest Range Labs"
     domains: [harvestrangelabs.com]

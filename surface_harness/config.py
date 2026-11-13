@@ -12,6 +12,13 @@ MODES = ("passive", "standard", "active")
 class Config:
     seeds: list[str]
     org_names: list[str] = field(default_factory=list)
+    # Non-domain scope: IP ranges (CIDRs like "203.0.113.0/24") and ASNs ("AS64500").
+    # Networks are expanded to host IPs and seeded for DNS/PTR enrichment (+ port scan in active).
+    networks: list[str] = field(default_factory=list)
+    asns: list[str] = field(default_factory=list)
+    # Cap on host addresses enumerated from CIDRs/ASN prefixes (4096 == a single /20).
+    # Raise it to deliberately expand larger ranges.
+    max_network_hosts: int = 4096
     # passive : only third-party data sources + DNS resolution of discovered names
     # standard: + HTTP(S) probing of live hosts on 80/443 and TLS cert collection
     # active  : + DNS brute force and TCP port scanning (requires --authorized)
