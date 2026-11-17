@@ -7,6 +7,7 @@ import contextlib
 import html
 import re
 import ssl
+from collections.abc import Callable
 
 import httpx
 from cryptography import x509
@@ -81,11 +82,36 @@ def detect_tech(resp: httpx.Response, body: str) -> list[str]:
     return sorted(set(f for f in found if f))[:20]
 
 
-async def http_probe(client: httpx.AsyncClient, url: str) -> tuple[HttpService, str]:
+MAX_REDIRECTS = 5
+
+
+async def http_probe(client: httpx.AsyncClient, url: str,
+                     allow: Callable[[str], bool] | None = None) -> tuple[HttpService, str]:
+    """GET a URL and fingerprint the response.
+
+    Redirects are followed by hand so each hop can be checked: when `allow(host)` is false for
+    the next hop, it is NOT requested. The response recorded is the last in-scope one and the
+    unfollowed target goes in `offscope_redirect` (still usable as evidence, never contacted).
+    Without `allow`, the client's own redirect setting applies.
+    """
     svc = HttpService(url=url)
     body = ""
     try:
-        resp = await client.get(url, headers={"User-Agent": UA})
+        if allow is None:
+            resp = await client.get(url, headers={"User-Agent": UA})
+        else:
+            cur = url
+            for _hop in range(MAX_REDIRECTS + 1):
+                resp = await client.get(cur, headers={"User-Agent": UA}, follow_redirects=False)
+                loc = resp.headers.get("location")
+                if not (resp.is_redirect and loc):
+                    break
+                nxt = str(resp.url.join(loc))
+                nxt_host = httpx.URL(nxt).host
+                if not nxt_host or not allow(nxt_host):
+                    svc.offscope_redirect = nxt
+                    break
+                cur = nxt
         body = resp.text[:500_000]
         svc.status = resp.status_code
         svc.final_url = str(resp.url)

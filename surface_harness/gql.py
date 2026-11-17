@@ -199,6 +199,22 @@ class CloudAsset:
     state: str = strawberry.field(description="public (listable) | private (exists, denied)")
 
 
+@strawberry.type(description="A tool that would help complete the external-surface picture.")
+class ToolRecommendation:
+    id: str
+    name: str
+    kind: str = strawberry.field(description="coverage-gap (harness integration switched off) | "
+                                             "complementary (outside the harness) | analyst")
+    priority: str = strawberry.field(description="high | medium | low")
+    area: str
+    adds: str
+    needs: str
+    enable: str
+    url: str
+    reasons: list[str]
+    targets: list[str]
+
+
 @strawberry.type(description="A Microsoft 365 / Entra tenant backing a domain.")
 class M365Tenant:
     target_id: str
@@ -583,6 +599,17 @@ class Query:
     def email_formats(self, target_id: str | None = None) -> list[EmailFormat]:
         return [r for t in _targets(target_id) for r in _email_formats(t)]
 
+    @strawberry.field(description="Tools recommended to complete the picture, across targets.")
+    def tool_recommendations(self, target_id: str | None = None, kind: str | None = None,
+                             min_priority: str | None = None) -> list[ToolRecommendation]:
+        order = {"high": 0, "medium": 1, "low": 2}
+        recs = STORE.doc.get("tool_recommendations") or []  # type: ignore[union-attr]
+        return [ToolRecommendation(**{k: r.get(k) or ([] if k in ("reasons", "targets") else "")
+                                      for k in ToolRecommendation.__annotations__})
+                for r in recs
+                if kind in (None, r.get("kind")) and target_id in (None, *r.get("targets", []))
+                and (min_priority is None or order.get(r.get("priority"), 9) <= order.get(min_priority, 9))]
+
     @strawberry.field(description="The node/edge graph (same as graph.json).")
     def graph(self) -> JSON:
         return STORE.graph  # type: ignore[union-attr]
@@ -594,6 +621,11 @@ schema = strawberry.Schema(query=Query)
 def load(path: str | Path) -> None:
     global STORE
     p = Path(path)
+    if p.is_dir() and not (p / "engagement.json").exists():
+        from .scope import run_names
+        runs = run_names(p)  # engagement directory: serve its latest run
+        if runs:
+            p = p / runs[-1]
     if p.is_dir():
         p = p / "engagement.json"
     if not p.exists():

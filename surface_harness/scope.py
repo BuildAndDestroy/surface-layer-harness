@@ -1,25 +1,44 @@
 """Engagement scope files: one per client contract.
 
     engagements/<engagement-id>/
-      scope.yaml                     <- you write this
-      targets/<target-id>/runs/...   <- one directory per harness run
-      targets/<target-id>/analysis.{json,md}   <- written by analyst subagents (optional)
-      summary.md                     <- boss agent's executive summary (optional)
-      engagement.json, report.md, graph.*      <- produced by `surface-harness merge`
+      scope.yaml                       <- you write this
+      latest -> <YYYYMMDD-HHMMSS>      <- symlink to the newest run
+      <YYYYMMDD-HHMMSS>/               <- one directory per engagement run; never reused
+        scope.yaml                     <- the scope as it was for this run
+        targets/<target-id>/runs/...   <- harness output for that target
+        targets/<target-id>/analysis.{json,md}   <- written by analyst subagents (optional)
+        summary.md                     <- boss agent's executive summary (optional)
+        engagement.json, report.md, report.html, graph.*   <- produced by `surface-harness merge`
+
+Every run gets its own dated directory, so a new run (or its analysis, summary and merged
+reports) can never overwrite an earlier one. Engagements created before this layout keep
+targets/ and the merged files directly in the engagement directory; they still merge.
 """
 
 from __future__ import annotations
 
+import contextlib
 import re
+import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import yaml
 
 from .config import MODES, Config
+from .models import ASSOCIATION_CAP
 from .networks import validate_asns, validate_networks
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+RUN_RE = re.compile(r"^\d{8}-\d{6}(-\d+)?$")
+
+
+def run_names(root: Path) -> list[str]:
+    """Dated run directories of an engagement, oldest first."""
+    if not root.is_dir():
+        return []
+    return sorted(p.name for p in root.iterdir() if p.is_dir() and not p.is_symlink() and RUN_RE.match(p.name))
 
 
 class ScopeError(ValueError):
@@ -50,10 +69,39 @@ class Scope:
     defaults: dict
     exclude: list[str]
     targets: list[Target]
+    run: str | None = None  # dated run directory under root; None = legacy layout (root itself)
 
     @property
     def root(self) -> Path:
         return self.path.parent
+
+    @property
+    def out_root(self) -> Path:
+        """Where this run's targets/, summary.md and merged reports live."""
+        return self.root / self.run if self.run else self.root
+
+    def new_run(self) -> Path:
+        """Create a fresh dated run directory, make it current, and return it."""
+        base = name = time.strftime("%Y%m%d-%H%M%S")
+        n = 1
+        while (self.root / name).exists():
+            n += 1
+            name = f"{base}-{n}"
+        (self.root / name / "targets").mkdir(parents=True)
+        self.run = name
+        self.snapshot()
+        link = self.root / "latest"
+        with contextlib.suppress(OSError):  # symlinks may be unavailable; the listing still works
+            if link.is_symlink():
+                link.unlink()
+            if not link.exists():
+                link.symlink_to(name, target_is_directory=True)
+        return self.out_root
+
+    def snapshot(self) -> None:
+        """Record the scope this run actually used next to its results."""
+        if self.run:
+            shutil.copyfile(self.path, self.out_root / "scope.yaml")
 
     @property
     def active_allowed(self) -> bool:
@@ -66,13 +114,17 @@ class Scope:
         raise ScopeError(f"unknown target id '{tid}' (have: {', '.join(t.id for t in self.targets)})")
 
     def target_dir(self, tid: str) -> Path:
-        return self.root / "targets" / tid
+        return self.out_root / "targets" / tid
 
     def config_for(self, t: Target, **overrides) -> Config:
         d = self.defaults
         mode = overrides.pop("mode", None) or t.mode or d.get("mode", "standard")
         if mode not in MODES:
             raise ScopeError(f"{t.id}: invalid mode '{mode}'")
+        thr = t.threshold if t.threshold is not None else d.get("threshold", 0.7)
+        if thr <= ASSOCIATION_CAP:
+            raise ScopeError(f"{t.id}: threshold {thr} must be above {ASSOCIATION_CAP}; at or below it, domains "
+                             f"with no ownership evidence (customers, vendors) would be treated as in scope")
         if mode == "active" and not self.active_allowed:
             raise ScopeError(f"{t.id}: active mode requested but authorization.active_testing is not true "
                              f"in {self.path}")
@@ -89,14 +141,31 @@ class Scope:
         )
 
 
-def load_scope(path: str | Path) -> Scope:
+def load_scope(path: str | Path, *, read_only: bool = False) -> Scope:
+    """Load an engagement scope.
+
+    `path` is the engagement directory, its scope.yaml, or one of its dated run directories
+    (which selects that run). With `read_only` (merge / reporting) and no run named, the
+    latest run is selected, and the scope.yaml stored with the run is the one read, so an
+    old run is reported with the scope it actually had.
+    """
     p = Path(path)
+    run = None
+    if p.is_dir() and RUN_RE.match(p.resolve().name) and (p.resolve().parent / "scope.yaml").exists():
+        run, p = p.resolve().name, p.resolve().parent
     if p.is_dir():
         p = p / "scope.yaml"
+    root = p.parent
+    if read_only and run is None:
+        run = (run_names(root) or [None])[-1]
+    src = p
+    if read_only and run and (root / run / "scope.yaml").exists():
+        src = root / run / "scope.yaml"
     try:
-        raw = yaml.safe_load(p.read_text()) or {}
+        raw = yaml.safe_load(src.read_text()) or {}
     except FileNotFoundError as e:
-        raise ScopeError(f"scope file not found: {p}") from e
+        raise ScopeError(f"scope file not found: {src}") from e
+    p = src  # error messages name the file that was read
     for key in ("engagement", "client", "targets"):
         if not raw.get(key):
             raise ScopeError(f"{p}: missing required key '{key}'")
@@ -127,9 +196,9 @@ def load_scope(path: str | Path) -> Scope:
             exclude=list(t.get("exclude") or []), mode=t.get("mode"), depth=t.get("depth"),
             threshold=t.get("threshold"), notes=t.get("notes") or "",
         ))
-    return Scope(path=p.resolve(), engagement=str(raw["engagement"]), client=str(raw["client"]),
-                 authorization=auth, defaults=raw.get("defaults") or {},
-                 exclude=list(raw.get("exclude") or []), targets=targets)
+    return Scope(path=(root / "scope.yaml").resolve(), engagement=str(raw["engagement"]),
+                 client=str(raw["client"]), authorization=auth, defaults=raw.get("defaults") or {},
+                 exclude=list(raw.get("exclude") or []), targets=targets, run=run)
 
 
 SCOPE_TEMPLATE = """\

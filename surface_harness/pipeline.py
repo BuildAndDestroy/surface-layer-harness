@@ -9,6 +9,13 @@
    └───────────────────────────────────────────────────────────────────────────────┘
                             ▼
       IP enrichment (ASN/PTR) ─► takeover checks ─► port scan (active) ─► findings
+
+Third-party kill-switch. Nothing is sent to a host unless its apex is *cleared*: a seed, or
+a discovered domain that has ownership evidence, scores above the threshold, is not excluded
+and has had its registration checked (see models.OWNERSHIP_SIGNALS and related.py). Every
+stage filters on that, redirects out of scope are not followed, and `Pipeline.guard()` is
+called again immediately before each request as a tripwire: if an uncleared host ever
+reaches a request, the run stops at once with meta.status = "killed".
 """
 
 from __future__ import annotations
@@ -28,9 +35,10 @@ from .dns_ops import Dns, load_wordlist
 from .domains import apex, is_subdomain_of, normalize
 from .email_sec import assess_email_security
 from .login_paths import scan_login_paths
-from .models import ApexDomain, Finding, Host, IpInfo, Surface
+from .models import ASSOCIATION_CAP, ApexDomain, Finding, Host, IpInfo, Surface
 from .ports import SHARED_EDGE_AS, nmap_services, scan
 from .probe import http_probe, tls_grab
+from .recommend import probe_capabilities
 from .related import RelatedDiscovery
 from .sources import UA, enumerate_passive
 from .takeover import assess
@@ -70,9 +78,17 @@ WEB_PORTS_TLS = {443, 4443, 7443, 8443, 9443}
 WEB_PORTS_PLAIN = {80, 81, 3000, 5000, 8000, 8008, 8080, 8081, 8088, 8888, 9000, 9090}
 
 
+class KillSwitch(RuntimeError):
+    """An uncleared (possibly third-party) host reached the point of being contacted."""
+
+
 class Pipeline:
     def __init__(self, cfg: Config, log: Callable[[str], None], checkpoint: Callable[[Surface], None]):
+        if cfg.expand_threshold <= ASSOCIATION_CAP:
+            raise ValueError(f"threshold must be above {ASSOCIATION_CAP}: at or below it, domains with no "
+                             f"ownership evidence (customers, vendors) would be treated as in scope")
         self.cfg = cfg
+        self.killed: str | None = None
         self._log = log
         self.checkpoint = checkpoint
         seeds = []
@@ -118,6 +134,27 @@ class Pipeline:
             return d
         return None
 
+    def cleared(self, host: str) -> ApexDomain | None:
+        """The in-scope apex of `host` if traffic to it is allowed, else None."""
+        d = self.in_scope_apex_of(host)
+        if d and (d.seed or (d.vetted and d.ownership and not d.third_party)):
+            return d
+        return None
+
+    def allowed(self, host: str) -> bool:
+        return self.cleared(host) is not None
+
+    def guard(self, host: str, action: str) -> None:
+        """Kill-switch tripwire: call immediately before sending anything to `host`."""
+        if self.killed:
+            raise KillSwitch(self.killed)
+        if self.cleared(host) is None:
+            a = apex(host)
+            d = self.s.domains.get(a) if a else None
+            why = (d.blocked or "not cleared for testing") if d else "not a known in-scope domain"
+            self.killed = f"refused to {action} {host}: {a or host} is not cleared ({why})"
+            raise KillSwitch(self.killed)
+
     def add_hosts(self, names, source: str) -> int:
         n = 0
         for raw in names:
@@ -134,6 +171,7 @@ class Pipeline:
 
     # -- stages ------------------------------------------------------------------
     async def enumerate_apex(self, d: ApexDomain, client: httpx.AsyncClient, rel: RelatedDiscovery) -> None:
+        self.guard(d.name, "enumerate")
         d.expanded = True
         self.log(f"[enum] {d.name} (depth {d.depth}, confidence {d.confidence})")
         self.s.add_host(d.name, d.name, "apex")
@@ -148,12 +186,13 @@ class Pipeline:
             self.add_hosts(found, "bruteforce")
 
     async def resolve_pending(self) -> None:
-        pending = [h for h in self.s.hosts.values() if h.resolved is None]
+        pending = [h for h in self.s.hosts.values() if h.resolved is None and self.allowed(h.name)]
         if not pending:
             return
         self.log(f"[dns] resolving {len(pending)} hosts")
 
         async def one(h: Host):
+            self.guard(h.name, "resolve")
             r = await self.dns.resolve_host(h.name)
             h.a, h.aaaa, h.cnames = r["a"], r["aaaa"], r["cname"]
             h.resolved = bool(h.a or h.aaaa)
@@ -169,7 +208,7 @@ class Pipeline:
 
     async def probe_pending(self, client: httpx.AsyncClient, rel: RelatedDiscovery) -> None:
         todo = [h for h in self.s.hosts.values()
-                if h.resolved and not h.wildcard and h.name not in self.probed]
+                if h.resolved and not h.wildcard and h.name not in self.probed and self.allowed(h.name)]
         if not todo:
             return
         self.log(f"[http] probing {len(todo)} hosts")
@@ -177,11 +216,12 @@ class Pipeline:
         async def one(h: Host):
             self.probed.add(h.name)
             async with self.sem:
+                self.guard(h.name, "probe")
                 tls = await tls_grab(h.name, 443, timeout=self.cfg.http_timeout)
                 if tls.error is None or tls.subject:
                     h.tls.append(tls)
                 for scheme in ("https", "http"):
-                    svc, body = await http_probe(client, f"{scheme}://{h.name}/")
+                    svc, body = await http_probe(client, f"{scheme}://{h.name}/", self.allowed)
                     if svc.error and scheme == "https" and not tls.subject:
                         continue  # nothing on 443; try plain http
                     h.http.append(svc)
@@ -191,16 +231,19 @@ class Pipeline:
                         break
             depth = self.s.domains[h.apex].depth
             for svc in h.http:
-                if svc.final_url:
-                    rel.from_redirect(h.name, svc.final_url, depth)
-                    final = normalize(svc.final_url)
+                dest = svc.offscope_redirect or svc.final_url
+                if dest:
+                    rel.from_redirect(h.name, dest, depth)
+                    final = normalize(dest)
                     if final:
                         self.add_hosts([final], "redirect")
             for body in self.bodies.get(h.name, []):
                 rel.from_links(h.name, body, depth)
             for t in h.tls:
                 rel.from_live_cert(h.name, t.sans, depth)
-                self.add_hosts(t.sans, "tls-san")
+                # Names on a certificate that doesn't even cover this host are someone else's.
+                if h.apex in {apex(n) for n in t.sans}:
+                    self.add_hosts(t.sans, "tls-san")
                 org = t.subject.get("O")
                 if t.valid and org and not GENERIC_ORG_RE.search(org) and h.apex in self.s.seeds:
                     if org not in self.s.org_names:
@@ -217,7 +260,8 @@ class Pipeline:
         idents = []
         if cfg.http_probe:  # fetching the target's own pages is not passive
             idents = list(await asyncio.gather(
-                *(site_identity(probe_client, d, rel.seed_stems, self.log) for d in self.s.seeds)))
+                *(site_identity(probe_client, d, rel.seed_stems, self.log, self.allowed)
+                  for d in self.s.seeds if self.allowed(d))))
             for ident in idents:
                 self.s.site_identity[ident.domain] = ident
                 for e in sorted(ident.emails):
@@ -308,7 +352,7 @@ class Pipeline:
         from .cloud import brand_stems, discover_buckets, discover_m365
         cfg = self.cfg
         in_scope = [d.name for d in self.s.in_scope_apexes(cfg.expand_threshold)]
-        domains = list(dict.fromkeys(self.s.seeds + in_scope))[:12]
+        domains = [d for d in dict.fromkeys(self.s.seeds + in_scope) if self.allowed(d)][:12]
         tenants, m365_findings = await discover_m365(client, domains, self.log)
         self.s.m365_tenants.extend(tenants)
         self.s.findings.extend(m365_findings)
@@ -333,8 +377,10 @@ class Pipeline:
         await asyncio.gather(*(one(h) for h in cands))
 
     async def port_scan(self, client: httpx.AsyncClient) -> None:
+        # Only IPs that a cleared host resolves to, or that came from an in-scope CIDR/ASN.
         targets = sorted(ip for ip, info in self.s.ips.items()
-                         if not (info.as_name and SHARED_EDGE_AS.search(info.as_name)))
+                         if not (info.as_name and SHARED_EDGE_AS.search(info.as_name))
+                         and (not info.hosts or any(self.allowed(h) for h in info.hosts)))
         skipped = len(self.s.ips) - len(targets)
         if skipped:
             self.log(f"[ports] skipping {skipped} IPs on shared CDN/WAF networks")
@@ -369,7 +415,8 @@ class Pipeline:
 
         async def one(h: Host, url: str):
             async with self.sem:
-                svc, body = await http_probe(client, url)
+                self.guard(h.name, "probe")
+                svc, body = await http_probe(client, url, self.allowed)
             if svc.status is not None:
                 h.http.append(svc)
                 if body:
@@ -384,9 +431,10 @@ class Pipeline:
         (SPF/DMARC/DKIM/MTA-STS/TLS-RPT) and DNS hygiene (AXFR/DNSSEC/CAA/dangling NS)
         for every in-scope apex, plus a TLS-config audit of live TLS hosts."""
         cfg = self.cfg
-        apexes = [d for d in self.s.in_scope_apexes(cfg.expand_threshold) if not self.excluded(d.name)]
+        apexes = [d for d in self.s.in_scope_apexes(cfg.expand_threshold) if self.allowed(d.name)]
         self.log(f"[hygiene] email + DNS checks on {len(apexes)} apex domain(s)")
         for d in apexes:
+            self.guard(d.name, "audit DNS of")
             email_rec, email_findings = await assess_email_security(self.dns, d.name)
             self.s.email_security[d.name] = email_rec
             self.s.findings.extend(email_findings)
@@ -398,7 +446,7 @@ class Pipeline:
             return
         targets: list[tuple[str, int]] = []
         for h in self.s.hosts.values():
-            if not h.resolved or h.wildcard:
+            if not h.resolved or h.wildcard or not self.allowed(h.name):
                 continue
             ports = {t.port for t in h.tls} | {p for p in h.open_ports if p in WEB_PORTS_TLS}
             targets.extend((h.name, p) for p in sorted(ports))
@@ -413,6 +461,7 @@ class Pipeline:
 
             async def one(name: str, port: int):
                 async with self.sem:
+                    self.guard(name, "audit TLS of")
                     return await audit_tls(name, port, http_client=client)
 
             for record, result in await asyncio.gather(*(one(n, p) for n, p in targets)):
@@ -422,10 +471,11 @@ class Pipeline:
     async def probe_login_paths(self, client: httpx.AsyncClient) -> None:
         """GET a small, constant set of known remote-access login paths on web hosts."""
         hosts = [h for h in self.s.hosts.values()
-                 if h.resolved and not h.wildcard and any(s.status is not None for s in h.http)]
+                 if h.resolved and not h.wildcard and self.allowed(h.name)
+                 and any(s.status is not None for s in h.http)]
         if not hosts:
             return
-        self.s.findings.extend(await scan_login_paths(client, hosts, self.sem, self.log))
+        self.s.findings.extend(await scan_login_paths(client, hosts, self.sem, self.log, self.allowed))
 
     async def credential_exposure(self, client: httpx.AsyncClient) -> None:
         """Passive credential-exposure reporting (standard+): breach counts by domain,
@@ -457,14 +507,28 @@ class Pipeline:
         order = {"high": 0, "medium": 1, "low": 2, "info": 3}
         self.s.findings.sort(key=lambda f: (order.get(f.severity, 9), f.kind, f.target))
 
+    def report_blocked(self) -> None:
+        """Log (once each) the domains third-party protection kept out of scope, and record
+        them in meta so reports can list what was deliberately not touched."""
+        blocked = sorted((d for d in self.s.domains.values()
+                          if d.blocked and d.raw_confidence >= self.cfg.expand_threshold),
+                         key=lambda d: (-d.raw_confidence, d.name))
+        seen = self.s.meta.setdefault("third_party_blocked", [])
+        known = {b["domain"] for b in seen}
+        for d in blocked:
+            if d.name not in known:
+                seen.append({"domain": d.name, "evidence_score": d.raw_confidence, "reason": d.blocked})
+                self.log(f"[killswitch] {d.name} not touched: {d.blocked} (evidence score {d.raw_confidence})")
+
     # -- main loop ------------------------------------------------------------------
     async def run(self) -> Surface:
         cfg = self.cfg
         self.log(f"[run] seeds={self.s.seeds} mode={cfg.mode} depth={cfg.max_depth} "
                  f"threshold={cfg.expand_threshold}")
+        caps = probe_capabilities(cfg.keys, self.runner, cfg.tools)
+        self.s.meta["capabilities"] = caps  # read by recommend.py for the coverage-gap report
         for t in ("subfinder", "naabu", "nmap"):
-            backend = self.runner.backend(t) if cfg.tools != "none" else None
-            self.log(f"[tools] {t}: {backend or 'unavailable (built-in fallback)'}")
+            self.log(f"[tools] {t}: {caps['tools'][t] or 'unavailable (built-in fallback)'}")
 
         src_client = httpx.AsyncClient(headers={"User-Agent": UA}, timeout=60, follow_redirects=True)
         probe_client = httpx.AsyncClient(
@@ -485,8 +549,7 @@ class Pipeline:
             expanded_count = 0
             for rnd in range(cfg.max_depth + 1):
                 targets = [d for d in self.s.domains.values()
-                           if not d.expanded and d.depth <= cfg.max_depth
-                           and d.confidence >= cfg.expand_threshold and not self.excluded(d.name)]
+                           if not d.expanded and d.depth <= cfg.max_depth and self.allowed(d.name)]
                 room = cfg.max_apexes - expanded_count
                 if not targets or room <= 0:
                     break
@@ -512,14 +575,24 @@ class Pipeline:
                 await self.resolve_pending()
                 if cfg.http_probe:
                     await self.probe_pending(probe_client, rel)
+                    # Domains promoted by what the probes saw must have their registration
+                    # checked before anything is sent to them.
+                    await rel.verify_by_registrant()
                     await self.resolve_pending()  # hosts learned from redirects / SANs
                     await self.probe_pending(probe_client, rel)
+                self.report_blocked()
                 self.checkpoint(self.s)
 
-            # Hosts discovered after the last round for apexes that became in-scope late.
+            # Drop names that were collected for an apex which is not cleared (never contacted).
             for h in list(self.s.hosts.values()):
-                if not is_subdomain_of(h.name, h.apex):
+                if not is_subdomain_of(h.name, h.apex) or not self.allowed(h.name):
                     del self.s.hosts[h.name]
+                    for ip in h.a + h.aaaa:
+                        info = self.s.ips.get(ip)
+                        if info:
+                            info.hosts.discard(h.name)
+                            if not info.hosts:
+                                del self.s.ips[ip]
 
             if cfg.http_probe:
                 await self.probe_login_paths(probe_client)
@@ -534,6 +607,13 @@ class Pipeline:
                 await self.credential_exposure(src_client)
             self.derive_findings()
             self.checkpoint(self.s)
+        except KillSwitch as e:
+            self.killed = self.killed or str(e)
+            self.log(f"[killswitch] RUN STOPPED: {self.killed}")
+            self.s.meta.update(finished_at=time.strftime("%Y-%m-%dT%H:%M:%S%z"), status="killed",
+                               kill_switch={"reason": self.killed})
+            self.report_blocked()
+            return self.s
         finally:
             await src_client.aclose()
             await probe_client.aclose()

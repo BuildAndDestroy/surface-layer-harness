@@ -297,7 +297,11 @@ def parse_site_page(ident: SiteIdentity, url: str, body: str, stems: set[str]) -
         ident.phones.add(re.sub(r"\s+", " ", t).strip())
 
 
-async def site_identity(client: httpx.AsyncClient, domain: str, stems: set[str], log) -> SiteIdentity:
+async def site_identity(client: httpx.AsyncClient, domain: str, stems: set[str], log,
+                        allow=None) -> SiteIdentity:
+    """Read what the organisation says about itself on its own site. With `allow`, a redirect
+    is only followed when allow(host) is true, so a page that bounces to a third party
+    (SSO, a vendor-hosted portal) is dropped instead of fetched."""
     ident = SiteIdentity(domain=domain)
     seen: set[str] = set()
     sem = asyncio.Semaphore(4)
@@ -306,7 +310,18 @@ async def site_identity(client: httpx.AsyncClient, domain: str, stems: set[str],
         url = f"https://{domain}{path}"
         async with sem:
             try:
-                r = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (compatible; surface-harness/0.1)"})
+                ua = {"User-Agent": "Mozilla/5.0 (compatible; surface-harness/0.1)"}
+                if allow is None:
+                    r = await client.get(url, headers=ua)
+                else:
+                    for _hop in range(6):
+                        r = await client.get(url, headers=ua, follow_redirects=False)
+                        loc = r.headers.get("location")
+                        if not (r.is_redirect and loc):
+                            break
+                        url = str(r.url.join(loc))
+                        if not allow(httpx.URL(url).host or ""):
+                            return None
             except Exception:  # noqa: BLE001
                 return None
         if r.status_code != 200:

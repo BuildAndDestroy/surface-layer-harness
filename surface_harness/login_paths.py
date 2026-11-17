@@ -52,7 +52,7 @@ def _base_scheme(h: Host) -> str | None:
 
 
 async def scan_login_paths(client: httpx.AsyncClient, hosts: list[Host],
-                           sem: asyncio.Semaphore, log) -> list[Finding]:
+                           sem: asyncio.Semaphore, log, allow=None) -> list[Finding]:
     """GET each known login path on responsive web hosts; fingerprint the reply."""
     findings: list[Finding] = []
     seen: set[tuple[str, str]] = set()  # (host, label) de-dup
@@ -60,7 +60,9 @@ async def scan_login_paths(client: httpx.AsyncClient, hosts: list[Host],
     async def one(h: Host, scheme: str, path: str, label: str, marker: re.Pattern[str]) -> None:
         url = f"{scheme}://{h.name}{path}"
         async with sem:
-            svc, body = await http_probe(client, url)
+            if allow is not None and not allow(h.name):
+                return
+            svc, body = await http_probe(client, url, allow)
         # A served login page returns a non-404 status; the marker confirms the product.
         if svc.status is None or svc.status in (400, 404):
             return

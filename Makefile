@@ -5,7 +5,8 @@ DOCKERFILE    := docker/Dockerfile
 .PHONY: help venv lint audit check test images tools-image harness-image scan scan-docker engagement-docker merge serve clean
 
 DOCKER_ENV = -e SECURITYTRAILS_API_KEY -e VIRUSTOTAL_API_KEY -e WHOISXML_API_KEY -e OTX_API_KEY \
-	-e CERTSPOTTER_API_KEY -e OPENCORPORATES_API_TOKEN -e SURFACE_CONTACT -e SEC_USER_AGENT
+	-e CERTSPOTTER_API_KEY -e OPENCORPORATES_API_TOKEN -e SURFACE_CONTACT -e SEC_USER_AGENT \
+	-e HIBP_API_KEY
 
 help:
 	@echo "make venv            - local Python venv (.venv) with the harness installed"

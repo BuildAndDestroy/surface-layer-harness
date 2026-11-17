@@ -8,13 +8,74 @@ Give it one or more seed domains. It finds the organisation's **other domains**,
 > refuses to run unless you pass `--authorized`, or unless the engagement scope sets
 > `active_testing: true`.
 
-**Contents:** [Engagements](#engagements-multiple-companies-per-contract) ·
+**Contents:** [Flow](#flow) · [Engagements](#engagements-multiple-companies-per-contract) ·
 [Agent orchestration](#agent-orchestration-boss--subagents) ·
 [Output and JSON contract](#output-one-report--json-for-tools) ·
 [Visualising and querying](#visualising-and-querying-graph--graphql) · [Pipeline](#pipeline) ·
+[Tool recommendations](#tool-recommendations-completing-the-picture) ·
 [Company information](#company-information) ·
 [Tools and API keys](#tools-data-sources-and-api-keys) · [Running it](#running-it) ·
 [Development and CI](#development-and-ci)
+
+## Flow
+
+The engagement, end to end. Rounded boxes are steps for the boss agent, subagents or harness;
+hexagons are points where the agent **stops and asks you**. Nothing in a hexagon is decided by an
+agent.
+
+```mermaid
+flowchart TD
+    A(["scope.yaml: targets + authorization"]) --> B["Boss pre-flight: authorization reference, window, active_testing"]
+    B -->|missing or out of window| STOP([Stop and ask the human])
+    B --> C["surface-harness doctor: API keys, binaries, mode"]
+    C --> D{{Human: close coverage gaps?<br/>export keys, build tools image,<br/>get active-testing authorization}}
+    D -->|gaps closed| C
+    D -->|"proceed, accepted gaps recorded"| E["Fan out: one surface-recon subagent per target, max N in parallel"]
+    E --> F1["Subagent: surface-harness engagement --target T --no-merge"]
+    F1 --> P[[Harness pipeline, see below]]
+    P --> R[Run dir: report.md, surface.json, findings.tsv,<br/>candidates.tsv, company.json, recommendations.json]
+    R --> F2[Subagent triage: scope decisions, passive verification,<br/>company check, target-specific tool needs]
+    F2 --> F3[analysis.json + analysis.md, reply to boss]
+    F3 --> G{Barrier: every subagent reported?}
+    G -->|no, failed once| E
+    G -->|yes| H[surface-harness merge]
+    H --> I[Cross-target review: summary.md with top risks,<br/>scope questions, coverage gaps, recommended tools]
+    I --> J[merge again: report.md, engagement.json, graph.html/json/cypher]
+    J --> K{{Human: which recommended tools next?<br/>coverage gaps vs complementary tools}}
+    K -->|close a coverage gap| E
+    K -->|approve a complementary tool<br/>with authorization / client access| L["Run it separately, output in tools/TOOL/"]
+    K -->|none for now| M[Agreed next steps in summary.md, final merge]
+    L --> M
+    M --> N([Deliver: report.md, engagement.json, graph.html, GraphQL via serve])
+```
+
+What a single harness run does (`scan`, or one target of `engagement`). Stages marked
+*standard* or *active* only run in that mode or higher.
+
+```mermaid
+flowchart TD
+    S(["Seed domains, org names, CIDRs, ASNs"]) --> W[RDAP registrant data]
+    W --> CO[Company intel: site identity, GLEIF, OpenCorporates,<br/>CO/NY/OR registries, SEC, Wikidata]
+    CO -->|legal names, official and subsidiary sites| RD
+    subgraph Round["Discovery round, repeats up to --depth while new apex domains appear"]
+        RD["Related-domain signals: CT SANs and O=, NS/MX/SPF/DMARC,<br/>RDAP match, reverse WHOIS, brand match"] --> SC{"Confidence >= threshold?"}
+        SC -->|yes: in scope| SD["Passive subdomains: crt.sh, CertSpotter, HackerTarget,<br/>OTX, Wayback, subfinder, SecurityTrails, VirusTotal<br/>+ DNS brute force in active"]
+        SC -->|0.3 to threshold| RV[Needs review: candidates.tsv]
+        SD --> RS[Resolve A/AAAA/CNAME, wildcard detection]
+        RS --> HP[HTTP/TLS probe, standard]
+        HP -->|"redirects, live cert SANs and O="| RD
+    end
+    RS --> NS[Network seeding from CIDR/ASN scope]
+    NS --> IP[IP enrichment: ASN, prefix, PTR]
+    IP --> CL[Cloud: S3/GCS/Azure buckets, M365 tenant]
+    CL --> TK[Takeover checks: dangling CNAMEs + fingerprints]
+    TK --> PS["Ports + nmap -sV, UDP VPN probes, active<br/>skips shared CDN/WAF IPs"]
+    PS --> PH[Protocol hygiene: SPF/DMARC/DKIM/MTA-STS, TLS config, AXFR/DNSSEC/CAA]
+    PH --> CE[Credential exposure: HIBP counts, email format, gitleaks]
+    CE --> FD[Findings]
+    FD --> RC[Tool recommendations: coverage gaps + complementary tools]
+    RC --> OUT([report.md, surface.json, recommendations.json, txt/tsv lists])
+```
 
 ## Engagements (multiple companies per contract)
 
@@ -59,13 +120,33 @@ harvestrangelabs.com).
 ```
 engagements/<id>/
   scope.yaml
-  targets/<target>/runs/<timestamp>/   one directory per harness run (report.md, surface.json, ...)
-  targets/<target>/analysis.json|.md   analyst output (subagents), optional
-  summary.md                           executive summary (boss agent), optional
-  report.md                            ONE consolidated report
-  engagement.json                      ONE machine-readable document (versioned schema)
-  graph.json | graph.cypher | graph.html
+  latest -> <YYYYMMDD-HHMMSS>            symlink to the newest run
+  <YYYYMMDD-HHMMSS>/                     ONE directory per engagement run, never reused
+    scope.yaml                           the scope as it was for this run
+    targets/<target>/runs/<timestamp>/   harness output (report.md, surface.json, ...)
+    targets/<target>/analysis.json|.md   analyst output (subagents), optional
+    summary.md                           executive summary (boss agent), optional
+    report.html                          work queue: what to do about each finding
+    report.md                            ONE consolidated report
+    engagement.json                      ONE machine-readable document (versioned schema)
+    graph.json | graph.cypher | graph.html
 ```
+
+**Runs never overwrite each other.** `surface-harness engagement <dir>` starts a new dated run
+directory every time; the harness output, the analysts' files, the summary and the merged
+reports of that run all live inside it. To run targets separately into one run (what the agents
+do), create it first and pass the run directory instead of the engagement directory:
+
+```bash
+RUN=$(surface-harness new-run engagements/acme)        # engagements/acme/20261116-170500
+surface-harness engagement "$RUN" --target acme-us --no-merge
+surface-harness engagement "$RUN" --target acme-eu --no-merge
+surface-harness merge "$RUN"                           # or: merge engagements/acme  (= latest run)
+```
+
+`merge` and `serve` given the engagement directory use the latest run; given a run directory
+they use that run, with the `scope.yaml` stored in it. Engagements created before this layout
+(with `targets/` directly in the engagement directory) still merge in place.
 
 ## Agent orchestration (boss + subagents)
 
@@ -73,12 +154,16 @@ The repo ships two Claude Code pieces:
 
 - `.claude/agents/surface-recon.md`: the **subagent**. It runs the harness for one target,
   decides scope for candidate domains, verifies findings passively, and writes
-  `targets/<id>/analysis.json` and `analysis.md`.
+  `<run>/targets/<id>/analysis.json` and `analysis.md`.
 - `.claude/commands/engagement.md`: the **boss**, available as the slash command
   `/engagement engagements/<id> [mode] [max-parallel]`.
 
-The boss sends one subagent per target in parallel, waits for all of them to finish (a barrier),
-merges, writes the executive summary, and merges again. Restart Claude Code after cloning so the
+The boss checks the environment with `surface-harness doctor` and **asks you** which coverage
+gaps to close before it starts (it never handles key values or edits the authorization). It then
+sends one subagent per target in parallel, waits for all of them to finish (a barrier), merges,
+writes the executive summary, and merges again. Finally it **asks you** which recommended tools
+to pursue next and records the answer in `summary.md`. Subagents can't ask you anything: they
+pass target-specific tool needs to the boss through `analysis.json → tool_recommendations`. Restart Claude Code after cloning so the
 agent and command are picked up.
 
 ### Template prompt
@@ -96,35 +181,47 @@ MAX PARALLEL:   {{4}}
 1. Pre-flight. Read {{dir}}/scope.yaml. Stop and ask me if authorization.reference is missing,
    if today is outside authorization.window, or if active mode is requested without
    authorization.active_testing: true. Check that `.venv/bin/surface-harness --help` works (or
-   that the surface-harness:latest Docker image exists). List the targets.
+   that the surface-harness:latest Docker image exists). List the targets. Run
+   `.venv/bin/surface-harness doctor {{dir}} --json`; if it reports coverage_gaps, show them and
+   ask me which to close (keys are exported by me, never pasted into chat; only I change
+   authorization). Record the gaps I accept.
 
-2. Fan out. For each target, dispatch a `surface-recon` subagent with: the engagement dir, the
-   target id and the mode override. Send all dispatches of a batch in ONE message so they run in
+2. Fan out. Create this run's directory with `.venv/bin/surface-harness new-run {{dir}}` (it
+   prints {{run}} = {{dir}}/<YYYYMMDD-HHMMSS>; all output of this run goes under it). For each
+   target, dispatch a `surface-recon` subagent with: the engagement dir, {{run}}, the target id
+   and the mode override. Send all dispatches of a batch in ONE message so they run in
    parallel, at most MAX PARALLEL per batch.
 
 3. Barrier. Wait until EVERY subagent has reported back before continuing (and between batches).
    Never merge or summarise partial results. Re-dispatch a failed target once, then record it
-   as failed.
+   as failed. A target with status `killed` hit the third-party kill-switch: never re-dispatch
+   it or edit scope.yaml to get past it; show me the reason and ask.
 
-4. Merge: `.venv/bin/surface-harness merge {{dir}}`. If it prints analysis warnings, fix that
+4. Merge: `.venv/bin/surface-harness merge {{run}}`. If it prints analysis warnings, fix that
    target's analysis.json to match the schema (or re-dispatch its agent), then merge again.
 
-5. Cross-target review. Read {{dir}}/engagement.json and write {{dir}}/summary.md, starting with
+5. Cross-target review. Read {{run}}/engagement.json and write {{run}}/summary.md, starting with
    "# Executive summary". Cover: scope and method; the top risks across all targets, ranked,
-   with target ids; scope questions for the client (all needs-client-confirmation decisions);
+   with target ids; scope questions for the client (all needs-client-confirmation decisions,
+   and the third-party domains the kill-switch held back);
    meaningful overlaps between targets (not CDNs); coverage gaps (missing API keys, failed
-   targets, errored sources).
+   targets, errored sources); "## Recommended tools" from engagement.json tool_recommendations
+   (high and medium, one line each: tool, targets, why, what it needs).
 
-6. Merge once more, then reply with the paths to report.md, engagement.json and graph.html, plus
-   a 5-line summary.
+6. Merge once more. Ask me which recommended tools to pursue next. Don't run a tool outside the
+   harness unless I approve it and the authorization covers it. Record my choices under
+   "## Agreed next steps" in summary.md, merge again, then reply with the paths to report.html,
+   report.md, engagement.json and graph.html, plus a 5-line summary.
 
 Rules: you coordinate and the subagents scan. Stay within scope.yaml and its exclude lists. No
 exploitation, logins, fuzzing or brute force. Never pivot on registered agents or WHOIS privacy
-proxies. Keep all output inside the engagement directory.
+proxies. Never send anything to a third party (customers, tenants, vendors). Keep all output
+inside this run's directory.
 ```
 
 Each subagent's prompt from the boss only needs the variable parts, for example: *"Engagement
-dir: engagements/acme-2026q4. Target id: acme-eu. Mode override: none."* The rules, steps and
+dir: engagements/acme-2026q4. Run dir: engagements/acme-2026q4/20261116-170500. Target id:
+acme-eu. Mode override: none."* The rules, steps and
 `analysis.json` schema live in `.claude/agents/surface-recon.md`.
 
 Without agents, `surface-harness engagement <dir> --parallel N` runs every target concurrently
@@ -133,11 +230,26 @@ in one process and merges. You get the same report, minus the analyst triage.
 ## Output: one report + JSON for tools
 
 `surface-harness merge` (run automatically after `engagement`) takes the **latest complete run**
-of each target, plus `analysis.json`/`analysis.md` and `summary.md` when present, and writes:
+of each target inside one engagement run directory, plus `analysis.json`/`analysis.md` and
+`summary.md` when present, and writes into that run directory:
+
+- **`report.html`**: the findings as a **work queue**, in one self-contained file (no network
+  access, opens from disk). Use it to act on the results:
+  - *Work queue*: every analyst-triaged finding with **what to do**, the evidence, a state
+    (to do / in progress / fixed / risk accepted / not an issue), an owner and notes. "Copy as
+    ticket" produces Markdown for Jira/GitHub; the whole queue exports as Markdown or CSV.
+    State is kept in the browser, keyed to the engagement and finding, so it carries over to
+    the report of the next run; export/import it as JSON to share it.
+  - *Decisions*: scope questions for the client (copy as an email, or as a `scope.yaml`
+    line), and the third-party domains the kill-switch refused to touch.
+  - *Raw findings*: all harness findings grouped by kind, each with its standard fix and the
+    affected assets ready to copy into one ticket or a script.
+  - *Next steps*: recommended tools, what each needs and the command that enables it.
 
 - **`report.md`**: one document for the client. It contains the engagement header and
   authorization, the executive summary, a targets overview, a single findings table across all
-  targets (analyst-validated and raw harness findings), cross-target overlap, and then a section
+  targets (analyst-validated and raw harness findings), cross-target overlap, **recommended tools
+  for a complete picture**, and then a section
   per target (analyst notes, scope decisions, company records, findings, domains, live hosts,
   networks).
 - **`engagement.json`**: the same content as one versioned document for downstream tools:
@@ -164,6 +276,9 @@ of each target, plus `analysis.json`/`analysis.md` and `summary.md` when present
       "tls_config": [...], "cloud_assets": [...], "m365_tenants": [...],
       "breaches": [...], "email_formats": [...]
     }
+  }],
+  "tool_recommendations": [{                 // since 1.1, see "Tool recommendations"
+    "id", "name", "kind", "priority", "area", "adds", "needs", "enable", "url", "reasons", "targets"
   }],
   "cross_target": { "shared_domains", "shared_ips", "shared_asns" }
 }
@@ -211,6 +326,8 @@ bump the major version, so importers can check the version and fail loudly.
   tlsConfig(weakOnly: true) { host port weakProtocols hsts expiresInDays }
   cloudAssets(provider: "s3") { name provider state url }
   m365Tenants { domain tenantId namespace federationHost federationBrand }
+  toolRecommendations(minPriority: "medium") { priority name kind needs enable targets reasons }
+                            # also: kind: "coverage-gap" | "complementary" | "analyst", targetId:
   breaches { domain accounts breachCount breaches { name year accounts } }
   emailFormats { domain format template samples considered }
   graph   # same as graph.json
@@ -256,6 +373,7 @@ seeds ─► RDAP registrant data
   └─► protocol hygiene (email auth SPF/DMARC/DKIM/MTA-STS, TLS config, DNS AXFR/DNSSEC/CAA)
   └─► credential exposure (HIBP breach counts, email-format, gitleaks public-repo secrets)
   └─► findings + report
+  └─► tool recommendations (coverage gaps + complementary tools, see below)
 ```
 
 ### How related domains are scored
@@ -277,6 +395,78 @@ threshold go to **"needs review"** in the report, so a person makes the scope ca
 
 Large shared providers (Google, Microsoft, AWS, Cloudflare, mail and DMARC vendors, and so on) are
 filtered out. Certificates covering more than 40 apex domains are ignored as shared hosting.
+
+### Third-party kill-switch
+
+The harness must never send traffic to someone who did not authorise it: the client's
+customers, tenants on the client's platform, vendors, SSO providers. Four layers enforce that,
+and none can be switched off:
+
+1. **Ownership evidence is required.** Only these signals say "the organisation owns this
+   domain": registrant org/email match, cert issued to `O=<org>`, reverse WHOIS, brand-stem
+   match, official/subsidiary website of the matched entity. Redirects, shared certificates,
+   links, NS/MX/SPF, `sameAs` and contact-email domains are *association* signals: they raise a
+   candidate for review, but a domain with association evidence only is capped at 0.45 and can
+   never be in scope, however many signals stack up. The threshold cannot be set at or below
+   that cap. (On a hosting platform, a tenant that redirects to its owner's SSO and presents
+   its owner's certificate would otherwise score 0.8.) A live certificate also only counts
+   when it actually covers the host that presented it.
+2. **Registrant veto.** A candidate whose registration names a different, unrelated
+   organisation is marked third-party and capped at 0.2, whatever else points at it.
+3. **Nothing is contacted before it is cleared.** A discovered domain is resolved, probed or
+   enumerated only once it has ownership evidence, is above the threshold, is not excluded, and
+   has had its registration checked. Redirects are followed hop by hop and **not followed out
+   of scope**: the target is recorded as evidence (`offscope_redirect`) and never requested.
+   `urls.txt` lists in-scope URLs only, so nothing third-party is handed to other tools.
+4. **Tripwire.** Immediately before every DNS, TLS or HTTP request the host is checked again.
+   If an uncleared host ever gets that far, the run stops at once: `meta.status` is `killed`,
+   `meta.kill_switch.reason` says which host and why, the CLI exits with code 3, and the reports
+   carry a KILL-SWITCH banner. The agents are told not to retry or work around it.
+
+What was held back is listed under **"Third-party domains not touched"** in the run's
+`report.md`, in `surface.json → meta.third_party_blocked`, and on the *Decisions* tab of
+`report.html`. Seeds are always in scope because you declared them: to authorise a held-back
+domain, add it to the target's `domains` in `scope.yaml`. Note that a seed which is a
+multi-tenant platform domain is enumerated and probed host by host, including hosts that
+belong to tenants; use `exclude` (or leave the domain out) if tenants are not authorised.
+
+## Tool recommendations: completing the picture
+
+The harness covers ownership-based domain discovery, DNS, web/TLS fingerprinting and passive
+exposure checks. Every run report ends with **Recommended tools for a complete picture**, and the
+engagement report consolidates them across targets (also `recommendations.json` per run,
+`engagement.json → tool_recommendations`, and the GraphQL `toolRecommendations` query). Nothing in
+that list is run automatically.
+
+- **Coverage gaps** are integrations the harness already has but couldn't use in this run: a
+  missing API key (WhoisXML, SecurityTrails, OpenCorporates, HIBP, ...), a missing binary
+  (subfinder, naabu/nmap, local gitleaks), `SURFACE_CONTACT` unset, or a mode that wasn't run
+  (passive → standard, no active-testing authorization). Close the gap, then re-run.
+- **Complementary tools** cover the parts of the external surface outside the harness, and are
+  recommended only when the run found something that calls for them:
+
+| Tool | Area | Recommended when | Needs |
+|---|---|---|---|
+| Shodan / Censys | Network services | IPs found; high priority when no port scan ran | API key |
+| gowitness / EyeWitness | Web applications | live web services | binary |
+| nuclei | Vulnerabilities | live web services | written authorization |
+| testssl.sh | TLS | TLS endpoints; medium when weak protocols seen | binary |
+| katana | Web applications | live web services (JS endpoints) | authorization for crawling |
+| dnstwist | Brand / phishing | always (lookalike domains) | binary |
+| GitHub/GitLab org search + trufflehog | Code / secrets | always; medium when repos or secrets found | GitHub token |
+| Prowler / ScoutSuite | Cloud | cloud buckets or IPs in cloud-provider ASNs | client read-only credentials |
+| Maester / CISA ScubaGear | Identity | Microsoft 365 tenant found | client read-only tenant access |
+| Burp Suite / OWASP ZAP | Web applications | exposed login portals or admin services | written authorization |
+| App-store search + MobSF | Mobile | always (low) | none for search |
+
+Analysts can add target-specific recommendations in `analysis.json → tool_recommendations`
+(`tool`, `priority`, `reason`, optional `needs`); they merge into the same list, tagged with the
+target. Check an environment before a run with:
+
+```bash
+.venv/bin/surface-harness doctor engagements/acme-2026q4      # uses the scope's modes + authorization
+.venv/bin/surface-harness doctor --mode active --json          # machine-readable, used by the boss agent
+```
 
 ## Company information
 
@@ -356,7 +546,7 @@ Each binary runs locally if it's on `PATH`, otherwise via `docker run --rm surfa
 | [Wayback Machine CDX](https://web.archive.org) | Historic URLs → hostnames | none | | |
 | [SecurityTrails](https://securitytrails.com) | Subdomain list | **required** | `SECURITYTRAILS_API_KEY` | Skipped without a key; small free tier |
 | [VirusTotal](https://www.virustotal.com) | Observed subdomains | **required** | `VIRUSTOTAL_API_KEY` | Skipped without a key; free public API is rate-limited |
-| subfinder providers | Extra aggregators (Shodan, Censys, Chaos, BinaryEdge, …) | optional | `~/.config/subfinder/provider-config.yaml` | Mounted read-only into the container when present |
+| subfinder providers | Extra aggregators (Shodan, Censys, Chaos, BinaryEdge, …) | optional | `~/.config/subfinder/provider-config.yaml` | Mounted read-only into the container when present. Start from `examples/provider-config.example.yaml` |
 
 ### Related-domain and ownership sources
 
@@ -460,6 +650,7 @@ See [Tools, data sources and API keys](#tools-data-sources-and-api-keys).
 | `candidates.tsv` | Related domains needing review, with their evidence |
 | `hosts.txt` / `all_hosts.txt` | Live non-wildcard hosts / every name discovered |
 | `urls.txt`, `ips.txt` | Responding web URLs / all resolved IPs |
+| `recommendations.json` | Coverage gaps and complementary tools for this run (also the last section of `report.md`) |
 | `findings.tsv` | Takeover candidates, exposed services, remote-access/admin interfaces, invalid or weak TLS, missing HSTS, email-auth gaps (SPF/DMARC/DKIM), DNS hygiene (AXFR/dangling NS), exposed cloud buckets, Microsoft 365 tenant/federation, credential/breach exposure, non-prod hosts, org-owned ASNs |
 
 Results are checkpointed after every round. Ctrl-C writes partial results.
@@ -488,12 +679,14 @@ Dependabot opens weekly grouped updates for actions, pip and the Docker base ima
 ## Layout
 ```
 surface_harness/
-  cli.py        subcommands: scan (default), init, engagement, merge, serve
-  scope.py      engagement scope.yaml loading/validation
+  cli.py        subcommands: scan (default), init, new-run, engagement, merge, serve, doctor
+  recommend.py  coverage gaps + complementary tool recommendations, doctor pre-flight
+  scope.py      engagement scope.yaml loading/validation, dated run directories
   engagement.py multi-target runs, merge, consolidated report
+  html_report.py report.html: findings as a work queue (states, tickets, exports)
   graph.py      graph model + json/cypher/html exporters
   gql.py        GraphQL schema + server (strawberry)
-  pipeline.py   orchestration (rounds, stages, findings)
+  pipeline.py   orchestration (rounds, stages, findings), third-party kill-switch
   sources.py    passive subdomain sources and subfinder
   related.py    related-domain discovery and scoring
   company.py    website identity, business registries, registered-agent handling
@@ -515,5 +708,6 @@ docker/Dockerfile   targets: tools (Go recon binaries + nmap), harness (tools + 
 .claude/agents/surface-recon.md     per-target analyst subagent
 .claude/commands/engagement.md      /engagement boss command
 examples/scope.example.yaml
+examples/provider-config.example.yaml   subfinder provider keys template
 .github/workflows/  ci, codeql, security, docker (see Development and CI)
 ```
