@@ -23,6 +23,12 @@ Signals (weights are deliberately conservative):
   site-contact    0.45  domain of a contact email published on the seed site
 
 Registered-agent names/addresses and privacy-proxy registrants are never used as signals.
+
+Third-party protection (see models.OWNERSHIP_SIGNALS): redirect, cert-san, dns-*, html-link,
+corp-parent and site-* are association signals. They raise a candidate for review but can
+never put it in scope on their own. A candidate whose registrant is a different, unrelated
+organisation is marked third-party and can never be in scope, whatever else points at it.
+To authorise such a domain, list it under the target's `domains` in scope.yaml.
 """
 
 from __future__ import annotations
@@ -33,7 +39,7 @@ from collections import Counter
 
 import httpx
 
-from .company import is_commercial_agent, same_entity
+from .company import is_commercial_agent, relates_to_brand, same_entity
 from .config import Config
 from .dns_ops import Dns
 from .domains import apex, brand_stem, is_third_party, normalize, stem_similarity
@@ -125,6 +131,11 @@ class RelatedDiscovery:
     def from_live_cert(self, host: str, sans: list[str], depth: int) -> None:
         apexes = {apex(s) for s in sans} - {None}
         if len(apexes) > MAX_APEXES_PER_CERT:
+            return
+        # Only a certificate that actually covers the host's own domain links the other names
+        # to it. A tenant on a hosting platform presenting its *own* certificate (which does
+        # not name the platform) says nothing about who owns the names on that certificate.
+        if apex(host) not in apexes:
             return
         for a in apexes:
             if a != apex(host):
@@ -219,21 +230,34 @@ class RelatedDiscovery:
             # Still record registration data for the report.
             pass
         cands = sorted(
-            (d for d in self.s.domains.values() if not d.seed and not d.whois and d.confidence >= min_conf),
-            key=lambda d: -d.confidence,
+            (d for d in self.s.domains.values() if not d.seed and not d.vetted and d.confidence >= min_conf),
+            key=lambda d: (-d.confidence, -d.raw_confidence),
         )[:limit]
         sem = asyncio.Semaphore(5)  # rdap.org is shared infrastructure; be gentle
 
         async def one(d: ApexDomain):
             async with sem:
                 d.whois = await self.rdap(d.name)
+            d.vetted = True
             org = (d.whois.get("org") or "").lower()
             email = (d.whois.get("email") or "").lower()
             known = self.seed_registrants["org"] | {o.lower() for o in self.s.org_names}
-            if org and not is_commercial_agent(org) and any(same_entity(org, k) for k in known):
+            org_match = bool(org) and not is_commercial_agent(org) and any(same_entity(org, k) for k in known)
+            email_match = bool(email) and email in self.seed_registrants["email"]
+            if org_match:
                 d.add_evidence("rdap-org", f"registrant org '{d.whois['org']}' matches seed", WEIGHTS["rdap-org"])
-            if email and email in self.seed_registrants["email"]:
+            if email_match:
                 d.add_evidence("rdap-email", f"registrant email '{email}' matches seed", WEIGHTS["rdap-email"])
+            # Registrant veto: a named registrant that is neither the client nor brand-related
+            # means the domain is somebody else's, whatever redirects or certificates say.
+            registrar = (d.whois.get("registrar") or "").lower()
+            if (org and known and not org_match and not email_match and not is_commercial_agent(org)
+                    and org != registrar and not relates_to_brand(org, self.seed_stems)):
+                was = d.raw_confidence
+                d.third_party = f"registrant is '{d.whois['org']}', not the client"
+                if was >= self.cfg.expand_threshold:
+                    self.log(f"[killswitch] {d.name} held out of scope: {d.third_party} "
+                             f"(evidence score {was})")
 
         await asyncio.gather(*(one(d) for d in cands))
 

@@ -96,7 +96,7 @@ def parse_args(argv: list[str] | None = None) -> Config:
     )
 
 
-SUBCOMMANDS = ("scan", "init", "engagement", "merge", "serve")
+SUBCOMMANDS = ("scan", "init", "new-run", "engagement", "merge", "serve", "doctor")
 
 
 def _log_factory(verbose: bool):
@@ -109,8 +109,12 @@ def _log_factory(verbose: bool):
 def cmd_scan(argv: list[str]) -> int:
     cfg = parse_args(argv)
     run_dir = Path(cfg.out_dir) / f"{time.strftime('%Y%m%d-%H%M%S')}_{cfg.seeds[0].replace('/', '_')}"
-    pipe = Pipeline(cfg, log=_log_factory(cfg.verbose),
-                    checkpoint=lambda s: write_all(s, run_dir, cfg.expand_threshold))
+    try:
+        pipe = Pipeline(cfg, log=_log_factory(cfg.verbose),
+                        checkpoint=lambda s: write_all(s, run_dir, cfg.expand_threshold))
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     try:
         surface = asyncio.run(pipe.run())
     except KeyboardInterrupt:
@@ -120,6 +124,27 @@ def cmd_scan(argv: list[str]) -> int:
     write_all(surface, run_dir, cfg.expand_threshold)
     print(f"\nResults: {run_dir}/report.md", file=sys.stderr)
     print(run_dir)
+    if surface.meta.get("status") == "killed":
+        print(f"KILL-SWITCH: {surface.meta['kill_switch']['reason']}", file=sys.stderr)
+        return 3
+    return 0
+
+
+def cmd_new_run(argv: list[str]) -> int:
+    from .scope import ScopeError, load_scope
+
+    p = argparse.ArgumentParser(
+        prog="surface-harness new-run",
+        description="Create a new dated run directory in an engagement and print its path. Pass that "
+                    "path to `engagement` and `merge` so every target of one run lands in the same place.")
+    p.add_argument("scope", help="engagement directory or scope.yaml")
+    a = p.parse_args(argv)
+    try:
+        scope = load_scope(a.scope)
+    except ScopeError as e:
+        p.error(str(e))
+    scope.run = None
+    print(scope.new_run())
     return 0
 
 
@@ -134,7 +159,7 @@ def cmd_init(argv: list[str]) -> int:
     scope = d / "scope.yaml"
     if scope.exists():
         p.error(f"{scope} already exists")
-    (d / "targets").mkdir(parents=True, exist_ok=True)
+    d.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-z0-9_-]", "-", d.name.lower()).strip("-") or "engagement"
     scope.write_text(SCOPE_TEMPLATE.format(engagement=slug, client=a.client.replace('"', "'")))
     print(f"created {scope} - edit targets and authorization, then: surface-harness engagement {d}")
@@ -147,7 +172,8 @@ def cmd_engagement(argv: list[str]) -> int:
 
     p = argparse.ArgumentParser(prog="surface-harness engagement",
                                 description="Run every target (or selected targets) in a scope file.")
-    p.add_argument("scope", help="engagement directory or scope.yaml")
+    p.add_argument("scope", help="engagement directory or scope.yaml (starts a new dated run), or an "
+                                 "existing run directory from `new-run` (adds to that run)")
     p.add_argument("--target", action="append", default=[], help="only this target id (repeatable)")
     p.add_argument("--parallel", type=int, default=2, help="targets to run at once (default 2)")
     p.add_argument("--mode", choices=MODES, help="override scope mode for this run")
@@ -174,8 +200,10 @@ def cmd_engagement(argv: list[str]) -> int:
         print(r)
     if not a.no_merge:
         write_merged(scope)
-        print(f"\nEngagement report: {scope.root / 'report.md'}", file=sys.stderr)
-    return 0
+        print(f"\nEngagement report: {scope.out_root / 'report.html'}", file=sys.stderr)
+    from .engagement import _load
+    killed = [r for r in runs if _load(r / "surface.json").get("meta", {}).get("status") == "killed"]
+    return 3 if killed else 0
 
 
 def cmd_merge(argv: list[str]) -> int:
@@ -183,20 +211,62 @@ def cmd_merge(argv: list[str]) -> int:
     from .scope import ScopeError, load_scope
 
     p = argparse.ArgumentParser(prog="surface-harness merge",
-                                description="Merge the latest run (+ analysis) of every target into report.md, "
-                                            "engagement.json and graph.{json,cypher,html}.")
-    p.add_argument("scope", help="engagement directory or scope.yaml")
+                                description="Merge every target's harness run (+ analysis) of one engagement run "
+                                            "into report.html, report.md, engagement.json and graph.*.")
+    p.add_argument("scope", help="engagement directory or scope.yaml (merges the latest run), or a run directory")
     a = p.parse_args(argv)
     try:
-        scope = load_scope(a.scope)
+        scope = load_scope(a.scope, read_only=True)
     except ScopeError as e:
         p.error(str(e))
     doc = write_merged(scope)
     for t in doc["targets"]:
         warn = f"  analysis warnings: {t['analysis_warnings']}" if t["analysis_warnings"] else ""
         print(f"{t['id']:<24} {t['status']:<10} {t['run_dir'] or '-'}{warn}", file=sys.stderr)
-    for f in ("report.md", "engagement.json", "graph.html", "graph.json", "graph.cypher"):
-        print(scope.root / f)
+    for f in ("report.html", "report.md", "engagement.json", "graph.html", "graph.json", "graph.cypher"):
+        print(scope.out_root / f)
+    return 0
+
+
+def cmd_doctor(argv: list[str]) -> int:
+    """Pre-flight: which harness integrations are switched off in this environment."""
+    import json
+
+    from .recommend import coverage_gaps, materialise, probe_capabilities, render_doctor
+    from .scope import ScopeError, load_scope
+    from .tools import ToolRunner
+
+    p = argparse.ArgumentParser(prog="surface-harness doctor",
+                                description="Check API keys, binaries and mode for coverage gaps before a run. "
+                                            "The engagement lead decides which gaps to close.")
+    p.add_argument("scope", nargs="?", help="engagement directory or scope.yaml (uses its modes/authorization)")
+    p.add_argument("--mode", choices=MODES, help="mode to check for (default: from scope, else standard)")
+    p.add_argument("--tools", choices=("auto", "local", "docker", "none"), default=DEFAULT_TOOLS)
+    p.add_argument("--docker-image", default="surface-tools:latest")
+    p.add_argument("--json", action="store_true", help="machine-readable output")
+    a = p.parse_args(argv)
+
+    cfg = Config(seeds=["example.com"])  # only used to read API keys from the environment
+    active_allowed = None
+    modes = {a.mode or "standard"}
+    if a.scope:
+        try:
+            scope = load_scope(a.scope)
+        except ScopeError as e:
+            p.error(str(e))
+        active_allowed = scope.active_allowed
+        if not a.mode:
+            modes = {t.mode or scope.defaults.get("mode", "standard") for t in scope.targets}
+    caps = probe_capabilities(cfg.keys, ToolRunner(a.tools, a.docker_image, log=lambda _m: None), a.tools)
+    recs = [r for m in sorted(modes) for r in coverage_gaps(caps, m, active_allowed)]
+    gaps = materialise(recs)
+    if a.json:
+        print(json.dumps({"modes": sorted(modes), "active_allowed": active_allowed,
+                          "capabilities": caps, "coverage_gaps": gaps}, indent=2))
+    else:
+        print(f"Modes: {', '.join(sorted(modes))}"
+              + ("" if active_allowed is None else f" · active testing authorised: {active_allowed}"))
+        print(render_doctor(gaps, caps))
     return 0
 
 
@@ -221,8 +291,8 @@ def main(argv: list[str] | None = None) -> int:
         cmd, argv = argv[0], argv[1:]
     else:
         cmd = "scan"  # backwards compatible: `surface-harness acme.com`
-    return {"scan": cmd_scan, "init": cmd_init, "engagement": cmd_engagement,
-            "merge": cmd_merge, "serve": cmd_serve}[cmd](argv)
+    return {"scan": cmd_scan, "init": cmd_init, "new-run": cmd_new_run, "engagement": cmd_engagement,
+            "merge": cmd_merge, "serve": cmd_serve, "doctor": cmd_doctor}[cmd](argv)
 
 
 if __name__ == "__main__":

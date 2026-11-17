@@ -12,10 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from .pipeline import Pipeline
+from .recommend import recommend_for_engagement, recommend_for_run
+from .recommend import render_markdown as render_recommendations
 from .report import write_all
 from .scope import Scope, Target
 
-ENGAGEMENT_SCHEMA_VERSION = "1.0"
+ENGAGEMENT_SCHEMA_VERSION = "1.2"  # 1.1: tool_recommendations; 1.2: run, kill-switch metadata
 ANALYSIS_SCHEMA = "surface-harness/analysis"
 SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -41,6 +43,8 @@ async def _run_target(scope: Scope, t: Target, overrides: dict, sem: asyncio.Sem
             pipe.s.meta.update(status="failed", error=f"{type(e).__name__}: {e}")
             surface = pipe.s
             echo(f"{prefix} FAILED: {e}")
+        if surface.meta.get("status") == "killed":
+            echo(f"{prefix} KILL-SWITCH: {surface.meta['kill_switch']['reason']}")
         write_all(surface, run_dir, cfg.expand_threshold)
         echo(f"{prefix} results: {run_dir}")
         return run_dir
@@ -49,6 +53,10 @@ async def _run_target(scope: Scope, t: Target, overrides: dict, sem: asyncio.Sem
 async def run_engagement(scope: Scope, target_ids: list[str] | None, parallel: int, overrides: dict,
                          echo=print) -> list[Path]:
     targets = [scope.target(tid) for tid in target_ids] if target_ids else scope.targets
+    if scope.run is None:
+        echo(f"[engagement] new run directory: {scope.new_run()}")
+    else:
+        scope.snapshot()  # the scope may have been edited since the run directory was created
     sem = asyncio.Semaphore(max(1, parallel))
     return list(await asyncio.gather(*(_run_target(scope, t, overrides, sem, echo) for t in targets)))
 
@@ -79,6 +87,13 @@ def _validate_analysis(a: dict, tid: str) -> list[str]:
         for k in ("severity", "status", "title"):
             if k not in f:
                 problems.append(f"findings[{i}] missing '{k}'")
+    recs = a.get("tool_recommendations", [])
+    if not isinstance(recs, list):
+        problems.append("tool_recommendations should be a list")
+    else:
+        for i, r in enumerate(recs):
+            if not isinstance(r, dict) or not r.get("tool") or not r.get("reason"):
+                problems.append(f"tool_recommendations[{i}] needs 'tool' and 'reason'")
     for i, d in enumerate(a.get("scope_decisions", [])):
         if d.get("decision") not in ("in-scope", "out-of-scope", "needs-client-confirmation"):
             problems.append(f"scope_decisions[{i}] has invalid decision '{d.get('decision')}'")
@@ -105,7 +120,7 @@ def _summary(run: dict) -> dict[str, Any]:
 
 
 def merge(scope: Scope) -> dict:
-    root = scope.root
+    root = scope.out_root
     targets_out = []
     ip_targets: dict[str, set[str]] = defaultdict(set)
     asn_targets: dict[str, set[str]] = defaultdict(set)
@@ -118,13 +133,14 @@ def merge(scope: Scope) -> dict:
         entry: dict[str, Any] = {"id": t.id, "name": t.name, "domains": t.domains, "org": t.org,
                                  "notes": t.notes, "status": "missing", "run_dir": None,
                                  "meta": None, "summary": None, "analysis": None,
-                                 "analysis_warnings": [], "surface": None}
+                                 "analysis_warnings": [], "recommendations": [], "surface": None}
         if run_dir:
             run = _load(run_dir / "surface.json")
             run.pop("log", None)
             meta = run.get("meta", {})
             entry.update(status=meta.get("status", "unknown"), run_dir=str(run_dir.relative_to(root)),
-                         meta=meta, summary=_summary(run), surface=run)
+                         meta=meta, summary=_summary(run), surface=run,
+                         recommendations=recommend_for_run(run, scope.active_allowed))
             thr = (meta.get("config") or {}).get("threshold", 0.7)
             for ip, info in run.get("ips", {}).items():
                 ip_targets[ip].add(t.id)
@@ -146,11 +162,15 @@ def merge(scope: Scope) -> dict:
         "schema": "surface-harness/engagement",
         "schema_version": ENGAGEMENT_SCHEMA_VERSION,
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "run": scope.run,  # dated run directory this document describes (None = legacy layout)
         "engagement": {"id": scope.engagement, "client": scope.client,
                        "authorization": scope.authorization, "defaults": scope.defaults,
                        "exclude": scope.exclude},
         "summary_md": (root / "summary.md").read_text() if (root / "summary.md").exists() else None,
         "targets": targets_out,
+        # What else is needed for a holistic picture: harness coverage gaps + complementary tools,
+        # aggregated across targets (including analysts' analysis.json tool_recommendations).
+        "tool_recommendations": recommend_for_engagement(targets_out, scope.active_allowed),
         "cross_target": {
             # Overlaps matter when targets are related companies (subsidiaries, shared IT).
             # Shared CDN/cloud IPs are expected; review before drawing conclusions.
@@ -190,6 +210,8 @@ def render_report(doc: dict, root: Path) -> str:
     w(f"# Attack surface assessment: {e['client']}\n")
     w("| | |\n|---|---|")
     w(f"| Engagement | `{e['id']}` |")
+    if doc.get("run"):
+        w(f"| Run | `{doc['run']}` |")
     w(f"| Authorization | {_esc(auth.get('reference'))} |")
     if auth.get("window"):
         w(f"| Testing window | {_esc(auth.get('window'))} |")
@@ -201,6 +223,12 @@ def render_report(doc: dict, root: Path) -> str:
         w("## Executive summary\n")
         w(_demote(doc["summary_md"].replace("# Executive summary", "").strip(), 1))
         w("")
+
+    for t in doc["targets"]:
+        kill = (t["meta"] or {}).get("kill_switch")
+        if kill:
+            w(f"> **KILL-SWITCH: target `{t['id']}` was stopped.** {_esc(kill.get('reason'))}. "
+              "Its results are partial.\n")
 
     w("## Targets overview\n")
     w("| Target | Status | Run | In-scope domains | Review | Live hosts | Web | IPs | Findings | Analysis |")
@@ -249,6 +277,9 @@ def render_report(doc: dict, root: Path) -> str:
             w(f"- {len(ct['shared_ips'])} shared IPs (see engagement.json → cross_target.shared_ips)")
         w("")
 
+    if doc.get("tool_recommendations"):
+        w(render_recommendations(doc["tool_recommendations"], "##", engagement=True))
+
     for t in doc["targets"]:
         w(f"---\n\n## Target: {t['name']} (`{t['id']}`)\n")
         w(f"Seeds: {', '.join(t['domains'])}" + (f" · Org: {', '.join(t['org'])}" if t["org"] else ""))
@@ -273,6 +304,8 @@ def render_report(doc: dict, root: Path) -> str:
             run_md = root / t["run_dir"] / "report.md"
             if run_md.exists():
                 body = re.sub(r"^# .*\n", "", run_md.read_text(), count=1)
+                # Tool recommendations are consolidated above; don't repeat them per target.
+                body = body.split("\n## Recommended tools for a complete picture")[0]
                 w(_demote(body, 1))
         else:
             w("_No harness run found for this target._")
@@ -282,11 +315,14 @@ def render_report(doc: dict, root: Path) -> str:
 
 def write_merged(scope: Scope) -> dict:
     from .graph import write_graph
+    from .html_report import render_html
 
     doc = merge(scope)
-    root = scope.root
+    root = scope.out_root
+    root.mkdir(parents=True, exist_ok=True)
     (root / "engagement.json").write_text(json.dumps(doc, indent=2, default=str))
     (root / "report.md").write_text(render_report(doc, root))
+    (root / "report.html").write_text(render_html(doc))
     write_graph(doc, root)
     return doc
 
@@ -295,7 +331,7 @@ ANALYSIS_TEMPLATE = {
     "schema": ANALYSIS_SCHEMA,
     "schema_version": "1.0",
     "target_id": "<target id>",
-    "run_dir": "<targets/<id>/runs/<timestamp>>",
+    "run_dir": "<targets/<id>/runs/<timestamp>, relative to the engagement run directory>",
     "summary": "2-4 sentence overview of this company's external attack surface.",
     "scope_decisions": [
         {"domain": "example-cdn.com", "decision": "needs-client-confirmation",
@@ -306,6 +342,11 @@ ANALYSIS_TEMPLATE = {
          "status": "confirmed", "title": "Dangling CNAME to unclaimed Azure App Service",
          "evidence": "dig CNAME old.example.com -> example-old.azurewebsites.net (NXDOMAIN)",
          "recommendation": "Remove the DNS record or reclaim the resource."}
+    ],
+    "tool_recommendations": [
+        {"tool": "nuclei", "priority": "medium",
+         "reason": "Jenkins and Grafana exposed; known-CVE templates would confirm versions.",
+         "needs": "written authorization for vulnerability scanning"}
     ],
     "notes": ["Anything a human reviewer should know."],
 }

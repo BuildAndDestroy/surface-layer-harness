@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .domains import apex
 from .models import Surface
+from .recommend import recommend_for_run
+from .recommend import render_markdown as render_recommendations
 
 
 def _md_escape(s: str | None) -> str:
@@ -29,6 +32,8 @@ def write_all(s: Surface, out: Path, threshold: float) -> None:
                     key=lambda d: (-d.confidence, d.name))
     live = sorted((h for h in s.hosts.values() if h.resolved), key=lambda h: h.name)
     urls = sorted({svc.final_url or svc.url for h in live for svc in h.http if svc.status})
+    in_names = {d.name for d in in_scope}
+    urls = [u for u in urls if (apex(u) or "") in in_names]  # never hand a third-party URL to other tools
 
     (out / "domains.txt").write_text("".join(f"{d.name}\n" for d in in_scope))
     (out / "candidates.tsv").write_text(
@@ -44,7 +49,10 @@ def write_all(s: Surface, out: Path, threshold: float) -> None:
     (out / "company.json").write_text(json.dumps(
         {"companies": s.to_dict()["companies"], "site_identity": s.to_dict()["site_identity"],
          "org_names": sorted(s.org_names)}, indent=2, default=str))
-    (out / "report.md").write_text(render_markdown(s, threshold, in_scope, review, live))
+    recs = recommend_for_run(s.to_dict())
+    (out / "recommendations.json").write_text(json.dumps(recs, indent=2))
+    (out / "report.md").write_text(render_markdown(s, threshold, in_scope, review, live) + "\n"
+                                   + render_recommendations(recs))
 
 
 def render_markdown(s, threshold, in_scope, review, live) -> str:
@@ -60,6 +68,21 @@ def render_markdown(s, threshold, in_scope, review, live) -> str:
     w("|---|---|---|---|---|")
     w(f"| {len(in_scope)} | {len(review)} | {len(s.hosts)} / {len(live)} | {len(s.ips)} | "
       f"{', '.join(f'{k}: {v}' for k, v in sorted(sev.items())) or '0'} |\n")
+
+    kill = s.meta.get("kill_switch")
+    if kill:
+        w(f"> **KILL-SWITCH: run stopped.** {_md_escape(kill.get('reason'))}. "
+          "Results below are partial; nothing was sent to the domain named.\n")
+    blocked = s.meta.get("third_party_blocked") or []
+    if blocked:
+        w("## Third-party domains not touched\n")
+        w("Evidence pointed at these domains, but they are not the client's (or nothing shows they "
+          "are), so nothing was sent to them. To authorise one, add it to the target's `domains` in "
+          "scope.yaml.\n")
+        w("| Domain | Evidence score | Why it was held back |\n|---|---|---|")
+        for b in blocked[:300]:
+            w(f"| {b['domain']} | {b['evidence_score']} | {_md_escape(b['reason'])} |")
+        w("")
 
     render_company(s, w)
 

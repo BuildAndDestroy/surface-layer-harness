@@ -7,6 +7,19 @@ from dataclasses import dataclass, field
 
 MODES = ("passive", "standard", "active")
 
+# Optional API keys / contact details read from the environment: (env var, key name).
+API_KEYS = (
+    ("SECURITYTRAILS_API_KEY", "securitytrails"),
+    ("VIRUSTOTAL_API_KEY", "virustotal"),
+    ("WHOISXML_API_KEY", "whoisxml"),
+    ("OTX_API_KEY", "otx"),
+    ("CERTSPOTTER_API_KEY", "certspotter"),
+    ("OPENCORPORATES_API_TOKEN", "opencorporates"),
+    ("HIBP_API_KEY", "hibp"),  # Have I Been Pwned: passive breach-by-domain counts
+    ("SEC_USER_AGENT", "sec_user_agent"),
+    ("SURFACE_CONTACT", "contact"),  # email/URL for Wikimedia + SEC User-Agent policies
+)
+
 
 @dataclass
 class Config:
@@ -48,17 +61,7 @@ class Config:
     keys: dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        for env, name in (
-            ("SECURITYTRAILS_API_KEY", "securitytrails"),
-            ("VIRUSTOTAL_API_KEY", "virustotal"),
-            ("WHOISXML_API_KEY", "whoisxml"),
-            ("OTX_API_KEY", "otx"),
-            ("CERTSPOTTER_API_KEY", "certspotter"),
-            ("OPENCORPORATES_API_TOKEN", "opencorporates"),
-            ("HIBP_API_KEY", "hibp"),  # Have I Been Pwned: passive breach-by-domain counts
-            ("SEC_USER_AGENT", "sec_user_agent"),
-            ("SURFACE_CONTACT", "contact"),  # email/URL for Wikimedia + SEC User-Agent policies  # e.g. "Acme Security research@acme.example"
-        ):
+        for env, name in API_KEYS:
             if os.environ.get(env) and name not in self.keys:
                 self.keys[name] = os.environ[env]
 

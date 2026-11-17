@@ -1,0 +1,62 @@
+# Example subfinder provider config. Copy it to ~/.config/subfinder/provider-config.yaml
+# and fill in the keys you have:
+#
+#   mkdir -p ~/.config/subfinder
+#   cp examples/provider-config.example.yaml ~/.config/subfinder/provider-config.yaml
+#   chmod 600 ~/.config/subfinder/provider-config.yaml
+#
+# The harness mounts that file read-only into the tools container when it exists; a local
+# subfinder binary reads it from the same path. Everything here is optional: subfinder
+# still runs its keyless sources without it.
+#
+# Format: one top-level entry per source, each a LIST of keys (subfinder rotates through
+# multiple keys). Leave a source as [] (or delete it) if you have no key. Sources that need
+# two values take them as one colon-joined string, as noted below.
+# `subfinder -ls` lists every source your subfinder version supports; sources that need a
+# key are marked with *.
+
+# --- Single API key ---
+bevigil: []
+binaryedge: []
+bufferover: []
+builtwith: []
+c99: []
+chaos: []            # ProjectDiscovery Chaos - free key at https://cloud.projectdiscovery.io
+chinaz: []
+dnsdb: []
+dnsdumpster: []
+fullhunt: []
+github: []           # personal access token(s), no scopes needed; several tokens help with rate limits
+hunter: []
+leakix: []
+netlas: []
+quake: []
+robtex: []
+shodan: []
+threatbook: []
+whoisxmlapi: []
+zoomeyeapi: []
+
+# The harness also queries these three directly via env vars (CERTSPOTTER_API_KEY,
+# SECURITYTRAILS_API_KEY, VIRUSTOTAL_API_KEY). Adding them here as well lets subfinder
+# use them too; it is not required.
+certspotter: []
+securitytrails: []
+virustotal: []
+
+# --- Composite keys (colon-joined, quote the string) ---
+censys: []           # - "API_ID:API_SECRET"
+fofa: []             # - "EMAIL:API_KEY"
+intelx: []           # - "HOST:API_KEY"   e.g. "2.intelx.io:xxxxxxxx-xxxx-..."
+passivetotal: []     # - "EMAIL:API_KEY"
+redhuntlabs: []      # - "ENDPOINT_URL:API_KEY"
+
+# Filled-in entries look like this:
+#
+# shodan:
+#   - AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+# github:
+#   - ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+#   - ghp_yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy
+# censys:
+#   - "your-api-id:your-api-secret"

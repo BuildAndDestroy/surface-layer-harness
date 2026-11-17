@@ -5,7 +5,18 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-RUN_SCHEMA_VERSION = "1.0"
+RUN_SCHEMA_VERSION = "1.1"  # 1.1: domains[*].raw_confidence/third_party/vetted/blocked, meta.kill_switch
+
+# Third-party protection. Only these signals say "the organisation owns this domain".
+# Everything else (redirects, shared certificates, links, MX/NS/SPF) only says "it is used
+# together with an in-scope host", which on a hosting platform or SaaS points at customers
+# and vendors. A domain without at least one ownership signal can never be in scope: its
+# confidence is capped at ASSOCIATION_CAP, below any allowed expand threshold.
+OWNERSHIP_SIGNALS = frozenset({
+    "brand", "cert-org", "rdap-org", "rdap-email", "reverse-whois", "corp-website", "corp-subsidiary",
+})
+ASSOCIATION_CAP = 0.45
+THIRD_PARTY_CAP = 0.2  # registrant is known to be somebody else
 
 
 @dataclass
@@ -27,9 +38,34 @@ class ApexDomain:
     evidence: list[Evidence] = field(default_factory=list)
     whois: dict[str, Any] = field(default_factory=dict)
     expanded: bool = False  # subdomain enumeration was run against it
+    third_party: str = ""  # why this domain is known to belong to someone else (never in scope)
+    vetted: bool = False  # registration data was checked; required before anything is sent to it
+
+    @property
+    def ownership(self) -> bool:
+        return self.seed or any(e.signal in OWNERSHIP_SIGNALS for e in self.evidence)
 
     @property
     def confidence(self) -> float:
+        """Score used for every scope decision: raw evidence, capped by third-party protection."""
+        if self.seed:
+            return 1.0
+        raw = self.raw_confidence
+        if self.third_party:
+            return min(raw, THIRD_PARTY_CAP)
+        if not self.ownership:
+            return min(raw, ASSOCIATION_CAP)
+        return raw
+
+    @property
+    def blocked(self) -> str:
+        """Why third-party protection holds this domain below its raw score ('' if it doesn't)."""
+        if self.seed or self.raw_confidence <= self.confidence:
+            return ""
+        return self.third_party or "no ownership evidence (only redirects, shared certificates, links or DNS)"
+
+    @property
+    def raw_confidence(self) -> float:
         if self.seed:
             return 1.0
         # One contribution per signal type (its strongest instance), so e.g. ten
@@ -58,6 +94,7 @@ class HttpService:
     content_length: int | None = None
     tech: list[str] = field(default_factory=list)
     error: str | None = None
+    offscope_redirect: str | None = None  # redirect target that was NOT followed (not in scope)
 
 
 @dataclass
@@ -294,7 +331,8 @@ class Surface:
             "companies": [norm(asdict(c)) for c in self.companies],
             "site_identity": {k: norm(asdict(v)) for k, v in sorted(self.site_identity.items())},
             "domains": {
-                k: {**norm(asdict(v)), "confidence": v.confidence}
+                k: {**norm(asdict(v)), "confidence": v.confidence,
+                    "raw_confidence": v.raw_confidence, "blocked": v.blocked}
                 for k, v in sorted(self.domains.items())
             },
             "hosts": {k: norm(asdict(v)) for k, v in sorted(self.hosts.items())},
