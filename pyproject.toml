@@ -14,7 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 graphql = ["strawberry-graphql[asgi]>=0.240", "uvicorn>=0.30"]
-dev = ["pytest>=8", "strawberry-graphql[asgi]>=0.240", "uvicorn>=0.30", "ruff==0.17.4", "pip-audit==2.10.1"]
+dev = ["pytest>=8", "strawberry-graphql[asgi]>=0.240", "uvicorn>=0.30", "ruff==0.17.5", "pip-audit==2.10.1"]
 
 [project.scripts]
 surface-harness = "surface_harness.cli:main"
