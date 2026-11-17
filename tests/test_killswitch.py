@@ -46,7 +46,7 @@ def test_live_cert_must_cover_the_host():
     assert "customer.com" not in rel.s.domains
     # A certificate shared between the platform and another name does link them.
     rel.from_live_cert("www.platform.com", ["platform.com", "platform-cdn.net"], 0)
-    assert "platform-cdn.net" in rel.s.domains
+    assert rel.s.domains.get("platform-cdn.net") is not None
 
 
 def test_registrant_veto_beats_all_other_evidence():
@@ -127,7 +127,7 @@ def test_probe_does_not_follow_redirects_out_of_scope():
 
     async def go():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True) as c:
-            return await http_probe(c, "https://tenant.platform.com/", lambda h: h.endswith("platform.com"))
+            return await http_probe(c, "https://tenant.platform.com/", lambda h: h == "platform.com" or h.endswith(".platform.com"))
 
     svc, _body = asyncio.run(go())
     assert seen == ["tenant.platform.com", "www.platform.com"]  # the customer was never contacted
